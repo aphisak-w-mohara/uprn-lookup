@@ -260,8 +260,11 @@ async function restore() {
       const b = document.createElement("button");
       b.textContent = "Reconnect " + saved.name;
       b.addEventListener("click", async () => {
-        if (await saved.requestPermission({ mode: "read" }) === "granted") setFile(await saved.getFile());
-        else fileErr("Permission denied.");
+        if (await saved.requestPermission({ mode: "read" }) === "granted") { setFile(await saved.getFile()); return; }
+        // A denial sticks for the origin, so this button can never succeed again.
+        // Drop it and send them back to the picker rather than leaving a dead end.
+        b.remove();
+        fileErr("Access to that file was denied - use Choose CSV\u2026 to pick it again.");
       });
       $("fileMsg").append("Previously used: ", b);
     } else if (saved instanceof File) {                     // Firefox / Safari
