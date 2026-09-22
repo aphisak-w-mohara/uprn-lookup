@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UPRN Lookup</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --bg: #fbfaf9; --panel: #fff; --ink: #1a1a19; --muted: #6b6b68;
+    --line: #e5e3e0; --accent: #2f6f4e; --accent-ink: #fff;
+    --bad: #a03227; --good: #2f6f4e; --code: #f2f0ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171714; --panel: #1f1f1c; --ink: #eceae6; --muted: #9b9a95;
+      --line: #32322e; --accent: #6fbf8f; --accent-ink: #12130f;
+      --bad: #e08b80; --good: #6fbf8f; --code: #262622;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171714; --panel: #1f1f1c; --ink: #eceae6; --muted: #9b9a95;
+    --line: #32322e; --accent: #6fbf8f; --accent-ink: #12130f;
+    --bad: #e08b80; --good: #6fbf8f; --code: #262622;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.45rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 0.875rem; margin: 0 0 24px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1 1 220px; min-width: 0; font: inherit; font-variant-numeric: tabular-nums;
+    padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink);
+  }
+  input[type=text]:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  button {
+    font: inherit; font-weight: 500; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .file-state { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.875rem; }
+  .file-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); word-break: break-all; }
+  .msg { margin-top: 12px; font-size: 0.9rem; }
+  .msg.err { color: var(--bad); }
+  dl.fields { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; align-items: baseline; }
+  dl.fields dt { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  dl.fields dd {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.95rem; display: flex; align-items: center; gap: 8px;
+  }
+  .copy {
+    padding: 2px 7px; font-size: 0.7rem; border-radius: 5px; line-height: 1.6;
+    color: var(--muted); background: var(--code); border-color: transparent;
+  }
+  #map { height: 320px; border-radius: 10px; margin-top: 16px; border: 1px solid var(--line); }
+  #map.hide { display: none; }
+  .links { margin-top: 12px; font-size: 0.85rem; }
+  .links a { color: var(--accent); }
+  .t { font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; white-space: pre-wrap; margin: 0; }
+  .t.p { color: var(--good); } .t.f { color: var(--bad); }
+  @media (max-width: 480px) { dl.fields { grid-template-columns: 1fr; gap: 2px 0; } dl.fields dd { margin-bottom: 8px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>UPRN Lookup</h1>
+  <p class="sub">OS Open UPRN &mdash; binary search straight off disk. Nothing is uploaded or imported.</p>
+
+  <div class="panel">
+    <div class="file-state">
+      <button id="pick" class="primary">Choose CSV&hellip;</button>
+      <span id="fileName" class="file-name">No file selected</span>
+    </div>
+    <input id="fallbackInput" type="file" accept=".csv,text/csv" hidden>
+    <div id="fileMsg" class="msg"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <input id="q" type="text" inputmode="numeric" placeholder="Enter a UPRN, e.g. 906700601612" autocomplete="off" disabled>
+      <button id="go" disabled>Look up</button>
+    </div>
+    <div id="result" class="msg"></div>
+  </div>
+
+  <div id="map" class="hide"></div>
+  <div id="links" class="links"></div>
+  <div id="tests" class="panel" hidden></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+
+/* ---------- IndexedDB: remembers WHICH file, never the rows ---------- */
+const DB = "uprn-lookup", STORE = "kv", KEY = "csv-source";
+
+function openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGet(k) {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const r = db.transaction(STORE).objectStore(STORE).get(k);
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function idbSet(k, v) {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(v, k);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+
+/* ---------- Binary search over the sorted CSV via Blob.slice ---------- */
+/* File is sorted ascending by UPRN, so ~31 seeks of 256 bytes finds any row.
+   NOTE: file is >2^31 bytes, so midpoints MUST use Math.floor, never >>1. */
+
+const WINDOW = 256;                 // max line is ~54 bytes; 256 is ample headroom
+const decoder = new TextDecoder();
+let headerEnd = null;               // byte offset of the first data line
+
+async function bytes(file, start, end) {
+  const s = Math.max(0, Math.min(start, file.size));
+  const e = Math.max(s, Math.min(end, file.size));
+  return new Uint8Array(await file.slice(s, e).arrayBuffer());
+}
+
+async function findHeaderEnd(file) {
+  const b = await bytes(file, 0, WINDOW);
+  const i = b.indexOf(10);
+  if (i < 0) throw new Error("No newline in first 256 bytes - is this the OS Open UPRN CSV?");
+  return i + 1;
+}
+
+// The complete line CONTAINING byte `pos`. Unambiguous, which is what keeps
+// the binary search below provably terminating.
+async function lineAt(file, pos, floor) {
+  const winStart = Math.max(floor, pos - WINDOW);
+  const back = await bytes(file, winStart, pos);
+  const nl = back.lastIndexOf(10);
+  let start;
+  if (nl >= 0) start = winStart + nl + 1;
+  else if (winStart === floor) start = floor;
+  else throw new Error("Line longer than " + WINDOW + " bytes - unexpected format");
+
+  const fwd = await bytes(file, start, start + WINDOW);
+  const e = fwd.indexOf(10);
+  const raw = decoder.decode(e < 0 ? fwd : fwd.subarray(0, e)).replace(/\r$/, "");
+  const end = e < 0 ? file.size : start + e + 1;
+  return { start, end, raw };
+}
+
+function parseRow(raw) {
+  const p = raw.split(",");
+  if (p.length < 5) return null;
+  const uprn = p[0].trim();
+  if (!/^\d+$/.test(uprn)) return null;
+  return {
+    uprn,
+    easting: Number(p[1]), northing: Number(p[2]),
+    lat: Number(p[3]), lng: Number(p[4]),
+  };
+}
+
+// Max UPRN is ~9.07e11, well under 2^53, so Number comparison is exact.
+async function lookup(file, targetStr) {
+  const target = Number(targetStr);
+  if (!Number.isSafeInteger(target)) throw new Error("UPRN must be a whole number");
+  if (headerEnd === null) headerEnd = await findHeaderEnd(file);
+
+  let lo = headerEnd, hi = file.size;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);     // NOT >>1 : file exceeds 2^31 bytes
+    const ln = await lineAt(file, mid, headerEnd);
+    const rec = parseRow(ln.raw);
+    if (!rec) { hi = ln.start > lo ? ln.start : mid; continue; }
+    const u = Number(rec.uprn);
+    if (u === target) return rec;
+    if (u < target) lo = ln.end;               // strictly increases: ln.end > mid >= lo
+    else hi = ln.start;                        // strictly decreases: ln.start <= mid < hi
+  }
+  return null;
+}
+
+/* ---------- Wiring ---------- */
+const $ = (id) => document.getElementById(id);
+let file = null, map = null, marker = null;
+
+function setFile(f, note) {
+  file = f; headerEnd = null;
+  $("fileName").textContent = f.name + "  (" + (f.size / 1048576).toFixed(1) + " MB)";
+  $("fileMsg").textContent = note || "";
+  $("fileMsg").className = "msg";
+  $("q").disabled = false; $("go").disabled = false;
+  $("q").focus();
+}
+function fileErr(m) { $("fileMsg").textContent = m; $("fileMsg").className = "msg err"; }
+
+async function pick() {
+  try {
+    if (window.showOpenFilePicker) {
+      const [h] = await showOpenFilePicker({
+        types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+      });
+      await idbSet(KEY, h).catch(() => {});
+      setFile(await h.getFile(), "Remembered - this file reloads automatically next time.");
+    } else {
+      $("fallbackInput").click();
+    }
+  } catch (e) {
+    if (e && e.name !== "AbortError") fileErr(e.message);
+  }
+}
+
+$("pick").addEventListener("click", pick);
+$("fallbackInput").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  await idbSet(KEY, f).catch(() => {});
+  setFile(f, "Remembered - this file reloads automatically next time.");
+});
+
+async function restore() {
+  let saved;
+  try { saved = await idbGet(KEY); } catch { return; }
+  if (!saved) return;
+  try {
+    if (typeof saved.getFile === "function") {              // FileSystemFileHandle
+      const perm = await saved.queryPermission({ mode: "read" });
+      if (perm === "granted") { setFile(await saved.getFile()); return; }
+      $("fileMsg").innerHTML = "";
+      const b = document.createElement("button");
+      b.textContent = "Reconnect " + saved.name;
+      b.addEventListener("click", async () => {
+        if (await saved.requestPermission({ mode: "read" }) === "granted") setFile(await saved.getFile());
+        else fileErr("Permission denied.");
+      });
+      $("fileMsg").append("Previously used: ", b);
+    } else if (saved instanceof File) {                     // Firefox / Safari
+      await saved.slice(0, 1).arrayBuffer();                // still readable?
+      setFile(saved);
+    }
+  } catch {
+    fileErr("The remembered file is no longer readable - choose it again.");
+  }
+}
+
+function copyBtn(text) {
+  const b = document.createElement("button");
+  b.className = "copy"; b.textContent = "copy"; b.type = "button";
+  b.setAttribute("aria-label", "Copy " + text);
+  b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(text); b.textContent = "copied"; }
+    catch { b.textContent = "failed"; }
+    setTimeout(() => (b.textContent = "copy"), 1200);
+  });
+  return b;
+}
+
+function render(rec) {
+  const dl = document.createElement("dl");
+  dl.className = "fields";
+  const fields = [
+    ["UPRN", rec.uprn],
+    ["Latitude", rec.lat.toFixed(7)],
+    ["Longitude", rec.lng.toFixed(7)],
+    ["Easting (BNG)", String(rec.easting)],
+    ["Northing (BNG)", String(rec.northing)],
+    ["Lat, Lng", rec.lat.toFixed(7) + ", " + rec.lng.toFixed(7)],
+  ];
+  for (const [k, v] of fields) {
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.append(document.createTextNode(v), copyBtn(v));
+    dl.append(dt, dd);
+  }
+  const out = $("result");
+  out.className = "msg"; out.replaceChildren(dl);
+
+  $("map").classList.remove("hide");
+  if (!map) {
+    map = L.map("map");
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+  }
+  map.setView([rec.lat, rec.lng], 18);
+  if (marker) marker.remove();
+  marker = L.marker([rec.lat, rec.lng]).addTo(map).bindPopup("UPRN " + rec.uprn).openPopup();
+  map.invalidateSize();
+
+  $("links").innerHTML =
+    '<a target="_blank" rel="noopener" href="https://www.google.com/maps?q=' + rec.lat + "," + rec.lng + '">Google Maps</a> &middot; ' +
+    '<a target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=' + rec.lat + "&mlon=" + rec.lng + '#map=19/' + rec.lat + "/" + rec.lng + '">OpenStreetMap</a>';
+}
+
+async function search() {
+  const raw = $("q").value.replace(/[\s,]/g, "");
+  const out = $("result");
+  $("links").textContent = "";
+  if (!raw) { out.className = "msg"; out.textContent = ""; return; }
+  if (!/^\d+$/.test(raw)) { out.className = "msg err"; out.textContent = "UPRNs are digits only."; return; }
+
+  out.className = "msg"; out.textContent = "Searching…";
+  const t0 = performance.now();
+  try {
+    const rec = await lookup(file, raw);
+    if (!rec) {
+      out.className = "msg err";
+      out.textContent = "UPRN " + raw + " is not in this file.";
+      $("map").classList.add("hide");
+      return;
+    }
+    render(rec);
+    out.insertAdjacentHTML("beforeend",
+      '<p class="sub" style="margin:12px 0 0">Found in ' + (performance.now() - t0).toFixed(0) + " ms</p>");
+  } catch (e) {
+    out.className = "msg err"; out.textContent = e.message;
+  }
+}
+
+$("go").addEventListener("click", search);
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+
+/* ---------- Self-check: open with ?test=1 after choosing the file ---------- */
+async function runTests() {
+  const box = $("tests"); box.hidden = false;
+  const log = (ok, m) => {
+    const p = document.createElement("p");
+    p.className = "t " + (ok ? "p" : "f");
+    p.textContent = (ok ? "PASS  " : "FAIL  ") + m;
+    box.append(p);
+    return ok;
+  };
+  const cases = [
+    ["1", { lat: 51.4526038, lng: -2.6020703 }],          // first data row
+    ["26", { lat: 51.5266333, lng: -2.6793612 }],         // duplicate-coordinate pair
+    ["27", { lat: 51.5266333, lng: -2.6793612 }],         // ...its twin
+    ["906700601612", { lat: 55.8823426, lng: -4.2786558 }], // last data row
+    ["2", null],                                          // interior miss
+    ["906700601613", null],                               // above max
+    ["0", null],                                          // below min
+  ];
+  let pass = 0;
+  for (const [uprn, want] of cases) {
+    let got;
+    try { got = await lookup(file, uprn); }
+    catch (e) { log(false, uprn + " threw: " + e.message); continue; }
+    if (want === null) {
+      if (log(got === null, uprn + " -> expected no match, got " + (got ? got.lat + "," + got.lng : "null"))) pass++;
+    } else if (!got) {
+      log(false, uprn + " -> expected " + want.lat + "," + want.lng + ", got null");
+    } else {
+      const ok = got.lat === want.lat && got.lng === want.lng;
+      if (log(ok, uprn + " -> " + got.lat + "," + got.lng)) pass++;
+    }
+  }
+  box.insertAdjacentHTML("afterbegin",
+    "<strong>Self-check: " + pass + "/" + cases.length + " passed</strong>");
+}
+
+restore().then(() => {
+  if (new URLSearchParams(location.search).get("test") === "1") {
+    if (file) runTests();
+    else $("fileMsg").textContent = "Choose the CSV to run the self-check.";
+    $("fallbackInput").addEventListener("change", () => setTimeout(runTests, 100), { once: true });
+  }
+});
+</script>
+</body>
+</html>
