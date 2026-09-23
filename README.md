@@ -22,11 +22,20 @@ cut into 5,088 chunks of 8192 records (128 KiB each), and `manifest.bin` holds
 the first UPRN of every chunk — 40 KiB total. A binary search over the manifest
 identifies the one chunk that can contain a given UPRN.
 
-So a lookup is: binary search 40 KiB in memory, fetch one 128 KiB chunk
-(~52 KiB gzipped over the wire), binary search 8192 records inside it.
+So a lookup is: binary search 40 KiB in memory, fetch one 128 KiB chunk,
+binary search 8192 records inside it.
 
 **One network round trip.** The manifest is cached after the first lookup, and
-chunks are served from the Cloudflare edge rather than a single region.
+chunks are served from the Cloudflare edge rather than a single region. A warm
+lookup measures around 40 ms.
+
+Chunks transfer uncompressed: Cloudflare compresses `text/*` but not
+`application/octet-stream`, so a lookup costs the full 128 KiB rather than the
+~52 KiB the data would gzip to. They are cached by both the browser and the
+edge, so this is a one-off per chunk. Halving `RECORDS_PER_CHUNK` to 4096 would
+halve the transfer at the cost of 10,176 files — still far under the 100,000
+per-deployment limit — but regenerating adds another full copy of the data to
+git history, so it is not worth doing for its own sake.
 
 ## API
 
