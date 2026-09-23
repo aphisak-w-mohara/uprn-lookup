@@ -1,0 +1,10 @@
+{
+  "version": "2026-09",
+  "md5": "1d5c21d8166d6efd74850ec6f1ae77ab",
+  "sourceFile": "osopenuprn_202609_csv.zip",
+  "rows": 41676575,
+  "chunks": 5088,
+  "recordBytes": 16,
+  "recordsPerChunk": 8192,
+  "builtAt": "2026-09-23T03:00:00Z"
+}

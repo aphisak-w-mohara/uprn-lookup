@@ -71,6 +71,35 @@ The generator asserts the input is strictly ascending and exits if it is not —
 the binary search depends on that property, so it is checked rather than
 assumed.
 
+## Refreshing the data
+
+OS publishes OS Open UPRN monthly. `.github/workflows/refresh-data.yml` runs on
+the 8th of each month, and can be triggered by hand with a `force` option.
+
+It checks the published md5 against `public/version.json` **before downloading
+anything**. An unchanged dataset means the job exits in a few seconds without
+committing — otherwise every month would add another identical ~254 MiB to git
+history.
+
+When the dataset has changed it downloads the zip, verifies the md5, rebuilds
+the chunks, samples 40 rows uniformly from the source CSV and looks each one up
+through the generated chunks, and only then commits and deploys.
+
+Requires two repository secrets: `CLOUDFLARE_API_TOKEN` (needs Workers Scripts
+edit) and `CLOUDFLARE_ACCOUNT_ID`.
+
+### A note on repository size
+
+Each refresh replaces every chunk, because UPRNs shift, and git history is
+append-only. That is roughly 254 MiB per release that never goes away — about
+3 GiB a year, against GitHub's 5 GB soft limit.
+
+If that becomes a problem, delete the `Commit` step from the workflow and
+gitignore `public/d/` and `public/manifest.bin`. The data is fully reproducible
+from the OS download, `wrangler deploy` uploads from the working tree, and the
+repository stops growing. The only thing lost is having the exact bytes of past
+releases in git.
+
 ## Deploying
 
 ```bash

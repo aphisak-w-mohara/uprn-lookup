@@ -1,0 +1,201 @@
+name: Refresh UPRN data
+
+# OS publishes OS Open UPRN monthly. This checks the published md5 before
+# doing anything: an unchanged dataset must not add another ~254 MiB of
+# identical binaries to git history.
+
+on:
+  schedule:
+    - cron: "17 6 8 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the published dataset is unchanged"
+        type: boolean
+        default: false
+
+concurrency:
+  group: refresh-uprn-data
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # History carries a full copy of the data per release, so it is large
+          # and grows. Only the tip is ever needed here.
+          fetch-depth: 1
+
+      - name: Read published dataset metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          api=https://api.os.uk/downloads/v1/products/OpenUPRN
+          curl -sS --fail --retry 3 --retry-delay 5 "$api" -o product.json
+          curl -sS --fail --retry 3 --retry-delay 5 \
+            "$api/downloads?area=GB&format=CSV" -o downloads.json
+
+          version=$(jq -r '.version' product.json)
+          md5=$(jq -r '.[0].md5' downloads.json)
+          size=$(jq -r '.[0].size' downloads.json)
+          name=$(jq -r '.[0].fileName' downloads.json)
+          url=$(jq -r '.[0].url' downloads.json)
+          for v in "$version" "$md5" "$name" "$url"; do
+            [ -n "$v" ] && [ "$v" != "null" ] || { echo "::error::incomplete metadata from OS API"; exit 1; }
+          done
+
+          have=$(jq -r '.md5 // ""' public/version.json 2>/dev/null || echo "")
+          echo "published: $name  version=$version  md5=$md5"
+          echo "in repo  : md5=${have:-none}"
+
+          { echo "version=$version"; echo "md5=$md5"; echo "size=$size";
+            echo "name=$name"; echo "url=$url"; } >> "$GITHUB_OUTPUT"
+
+          if [ "$md5" = "$have" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "### No change — dataset still \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and verify
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          curl -sS --fail --retry 3 --retry-delay 10 -L \
+            "${{ steps.meta.outputs.url }}" -o data.zip
+          echo "${{ steps.meta.outputs.md5 }}  data.zip" > data.md5
+          # Fail loudly on a corrupt or truncated download rather than
+          # generating chunks from a partial file.
+          md5sum -c data.md5
+          unzip -o -q data.zip -d raw
+          csv=$(find raw -name 'osopenuprn_*.csv' -print -quit)
+          [ -n "$csv" ] || { echo "::error::no osopenuprn_*.csv in the archive"; exit 1; }
+          echo "CSV_PATH=$csv" >> "$GITHUB_ENV"
+          ls -l "$csv"
+
+      - name: Rebuild chunks
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/build-chunks.py "$CSV_PATH" public | tee build.log
+          rows=$(grep -oE '^[0-9,]+ rows' build.log | tr -d ', rows')
+          chunks=$(ls public/d/*.bin | wc -l | tr -d ' ')
+          echo "ROWS=$rows"     >> "$GITHUB_ENV"
+          echo "CHUNKS=$chunks" >> "$GITHUB_ENV"
+
+      - name: Verify output against the source CSV
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 - "$CSV_PATH" <<'PY'
+          import os, random, struct, sys
+          csv_path = sys.argv[1]
+
+          man = open("public/manifest.bin", "rb").read()
+          firsts = struct.unpack(f"<{len(man)//8}Q", man)
+          chunks = sorted(f for f in os.listdir("public/d") if f.endswith(".bin"))
+          assert len(chunks) == len(firsts), f"{len(chunks)} chunks vs {len(firsts)} manifest entries"
+
+          total = sum(len(open(f"public/d/{c}", "rb").read()) for c in chunks) // 16
+          print(f"{len(chunks)} chunks, {total:,} records")
+
+          # Uniform sample across the whole file, not just the head.
+          want_idx = sorted(random.sample(range(total), 40))
+          picked, k = [], 0
+          with open(csv_path, encoding="utf-8-sig") as fh:
+              next(fh)
+              for i, line in enumerate(fh):
+                  if k < len(want_idx) and i == want_idx[k]:
+                      picked.append(line.rstrip().split(","))
+                      k += 1
+                      if k == len(want_idx):
+                          break
+          assert len(picked) == 40, f"only sampled {len(picked)} rows"
+
+          def lookup(target):
+              lo, hi, found = 0, len(firsts) - 1, -1
+              while lo <= hi:
+                  mid = (lo + hi) // 2
+                  if firsts[mid] <= target: found, lo = mid, mid + 1
+                  else: hi = mid - 1
+              if found < 0: return None
+              data = open(f"public/d/{found:04d}.bin", "rb").read()
+              lo, hi = 0, len(data) // 16 - 1
+              while lo <= hi:
+                  mid = (lo + hi) // 2
+                  u, la, ln = struct.unpack_from("<Qii", data, mid * 16)
+                  if u == target: return la, ln
+                  if u < target: lo = mid + 1
+                  else: hi = mid - 1
+              return None
+
+          bad = 0
+          for p in picked:
+              got = lookup(int(p[0]))
+              want = (round(float(p[3]) * 1e7), round(float(p[4]) * 1e7))
+              if got != want:
+                  bad += 1
+                  print(f"MISMATCH {p[0]}: got {got} want {want}")
+          assert bad == 0, f"{bad} of {len(picked)} sampled lookups failed"
+          print(f"verified {len(picked)} uniform-sampled lookups against the source CSV")
+          PY
+
+      - name: Write version.json
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "${{ steps.meta.outputs.version }}" \
+            --arg md5     "${{ steps.meta.outputs.md5 }}" \
+            --arg file    "${{ steps.meta.outputs.name }}" \
+            --argjson rows   "${ROWS:-0}" \
+            --argjson chunks "${CHUNKS:-0}" \
+            --arg built   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version:$version, md5:$md5, sourceFile:$file, rows:$rows,
+              chunks:$chunks, recordBytes:16, recordsPerChunk:8192, builtAt:$built}' \
+            > public/version.json
+          cat public/version.json
+
+      - name: Commit
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A public
+          if git diff --cached --quiet; then
+            echo "nothing staged"; exit 0
+          fi
+          git commit -m "Rebuild chunks for OS Open UPRN ${{ steps.meta.outputs.version }}
+
+          Source ${{ steps.meta.outputs.name }}, md5 ${{ steps.meta.outputs.md5 }},
+          verified before rebuilding. $ROWS rows across $CHUNKS chunks."
+          git push
+
+      - name: Deploy
+        if: steps.meta.outputs.changed == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy
+
+      - name: Summary
+        if: steps.meta.outputs.changed == 'true'
+        run: |
+          {
+            echo "### Rebuilt for \`${{ steps.meta.outputs.version }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| source | \`${{ steps.meta.outputs.name }}\` |"
+            echo "| md5 | \`${{ steps.meta.outputs.md5 }}\` |"
+            echo "| rows | $ROWS |"
+            echo "| chunks | $CHUNKS |"
+          } >> "$GITHUB_STEP_SUMMARY"
