@@ -27,17 +27,38 @@ UPRN, and each row is five numbers.
 ## Architecture
 
 ```
-OS Data Hub  ──monthly──►  GitHub Actions  ──►  git (5,088 chunks)
-                                │
-                                └──►  Cloudflare Workers
-                                        ├── static assets  ◄── browser fetches directly
-                                        └── Worker         ◄── /api/* for other callers
+OS Data Hub ──monthly──► GitHub Actions ──► git ──push──► Cloudflare
+                          md5 gate                          │
+                          rebuild                           │
+                          verify 40 rows                    │
+                                                            ▼
+                                              ┌─────────── Worker ───────────┐
+   browser ──────────────────────────────────►│  static assets               │
+     fetches manifest + one chunk directly    │    index.html                │
+     no Worker invocation                     │    manifest.bin  17 KB       │
+                                              │    d/0000..5087.bin  213 MiB │
+                                              │                              │
+   other callers ─── GET /api/uprn/{id} ─────►│  rate limit  120/min/IP      │
+                                              │       ▼                      │
+                                              │  KV cache    u:{ver}:{uprn}  │
+                                              │       ▼ miss                 │
+                                              │  same search over assets     │
+                                              └──────────────────────────────┘
 ```
 
-Nothing queries a database. The browser fetches two static files from the CDN
-and searches them itself; the Worker exists only so other callers get a JSON
-API, and runs the identical search over the same assets, fronted by a rate
-limit and a KV cache that the page never touches.
+Nothing queries a database. There are two paths and they share the data, not
+the code path:
+
+- **The page** fetches `manifest.bin` and one chunk straight from the CDN and
+  searches them in the browser. It never calls the API, so a lookup costs no
+  Worker invocation, and neither the rate limit nor the cache can affect it.
+- **The API** exists so other callers get JSON. It runs the identical search
+  over the same static assets through its asset binding, fronted by a rate
+  limit and a KV cache.
+
+That split is deliberate. The site cannot be locked out by traffic hammering
+the endpoint — verified by running the page's self-check from an IP that was
+actively being rate limited.
 
 ### Lookup: two binary searches, one round trip
 
@@ -57,6 +78,20 @@ Worked example for `200004746037`:
 25 comparisons, **one network request**, ~40 ms warm. The manifest is cached
 after the first lookup, and chunks are served from the nearest Cloudflare edge
 rather than a single region.
+
+The API adds a KV lookup in front of that, which skips the fetch and inflate
+entirely: 111 ms on a hit against 391 ms for the full path.
+
+### Numbers
+
+| | |
+|---|---|
+| source | 41,676,575 rows, 2168 MiB of CSV |
+| deployed | 5,088 chunks, **213 MiB**, plus a 17 KB manifest |
+| per lookup | ~43 KB, one round trip |
+| API cached / uncached | 111 ms / 391 ms |
+| rate limit | 120 req/min/IP, fails open |
+| repository | ~213 MiB added per release, permanently |
 
 ### Record and chunk layout
 
@@ -175,9 +210,13 @@ public/
   version.json      dataset provenance, rewritten by CI
   _headers          cache policy for chunks
   d/0000.bin ...    5,088 gzipped columnar chunks
-src/worker.js       /api/* — same search, over the asset binding
+src/worker.js       /api/* — rate limit, KV cache, same search
 tools/build-chunks.py   CSV -> chunks + manifest
+wrangler.jsonc      bindings: ASSETS, UPRN_CACHE (KV), API_LIMITER
 ```
+
+Bindings are declared in `wrangler.jsonc`; the KV namespace id is in there and
+the deploy token lives in repository secrets.
 
 ## Automation
 
