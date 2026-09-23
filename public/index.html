@@ -107,6 +107,7 @@
   <div id="tests" class="panel" hidden></div>
 
   <footer class="sub" style="margin-top:32px;border-top:1px solid var(--line);padding-top:16px">
+    <p id="dataver" style="margin:0 0 8px"></p>
     Contains Ordnance Survey data &copy; Crown copyright and database right 2026.
     Released under the <a href="https://www.ordnancesurvey.co.uk/licensing/os-open-data-licence" target="_blank" rel="noopener" style="color:var(--accent)">OS OpenData Licence</a>.
     Get the CSV from <a href="https://osdatahub.os.uk/downloads/open/OpenUPRN" target="_blank" rel="noopener" style="color:var(--accent)">OS Data Hub &rarr; Open UPRN</a>.
@@ -444,6 +445,23 @@ async function runTests() {
   box.insertAdjacentHTML("afterbegin",
     "<strong>Self-check: " + pass + "/" + cases.length + " passed</strong>");
 }
+
+/* Dataset provenance, written by the refresh workflow. Non-blocking and
+   non-fatal: if it is missing the page still works, it just says less. */
+fetch("version.json")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((v) => {
+    if (!v || !v.version) return;
+    const built = new Date(v.builtAt);
+    const when = isNaN(built) ? "" : built.toLocaleDateString(undefined, {
+      day: "numeric", month: "short", year: "numeric",
+    });
+    const bits = ["OS Open UPRN " + v.version];
+    if (typeof v.rows === "number") bits.push(v.rows.toLocaleString() + " records");
+    if (when) bits.push("indexed " + when);
+    $("dataver").textContent = bits.join(" \u00b7 ");
+  })
+  .catch(() => {});
 
 restore().then(() => {
   if (new URLSearchParams(location.search).get("test") === "1") runTests();
