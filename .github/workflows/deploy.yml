@@ -1,0 +1,65 @@
+name: Deploy
+
+# Deploys whatever is on main. The data refresh workflow deploys from its own
+# job rather than relying on this one: pushes made with GITHUB_TOKEN do not
+# trigger workflows, so its commit would never reach here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "public/**"
+      - "src/**"
+      - "wrangler.jsonc"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-uprn-lookup
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # Pinned by commit SHA, not tag: this job holds a Cloudflare deploy
+      # token and a tag can be repointed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.136.3 deploy
+
+      - name: Smoke test the deployment
+        env:
+          BASE: https://uprn-lookup.aphisak.workers.dev
+        run: |
+          set -euo pipefail
+          # A green deploy that serves wrong bytes is the failure worth
+          # catching, so assert real coordinates rather than just a 200.
+          check() {
+            local uprn="$1" want="$2" got=""
+            for attempt in 1 2 3 4 5; do
+              got=$(curl -sS --max-time 20 "$BASE/api/uprn/$uprn" | tr -d ' \n')
+              [ "$got" = "$want" ] && { echo "ok   $uprn"; return 0; }
+              sleep 5
+            done
+            echo "::error::$uprn returned $got, expected $want"
+            return 1
+          }
+          check 1            '{"uprn":"1","lat":51.4526038,"lng":-2.6020703}'
+          check 906700601612 '{"uprn":"906700601612","lat":55.8823426,"lng":-4.2786558}'
+          check 2            '{"error":"Notfound","uprn":"2"}'
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$BASE/")
+          [ "$code" = "200" ] || { echo "::error::page returned $code"; exit 1; }
+          echo "ok   page 200"
+          echo "### Deployed and smoke-tested" >> "$GITHUB_STEP_SUMMARY"

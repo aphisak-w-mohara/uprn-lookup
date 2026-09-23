@@ -116,6 +116,17 @@ releases in git.
 
 ## Deploying
 
+Pushes to `main` that touch `public/`, `src/` or `wrangler.jsonc` deploy
+automatically via `.github/workflows/deploy.yml`, which then smoke-tests the
+live URL against known coordinates — a green deploy serving wrong bytes is the
+failure worth catching.
+
+The refresh workflow deploys from its own job rather than relying on that one:
+pushes made with `GITHUB_TOKEN` do not trigger workflows, so its commit would
+never reach it.
+
+By hand:
+
 ```bash
 wrangler deploy
 ```
