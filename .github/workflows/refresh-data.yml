@@ -26,7 +26,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      # Pinned by commit SHA, not tag: this job holds a Cloudflare deploy
+      # token and contents: write, and a tag can be repointed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # History carries a full copy of the data per release, so it is large
           # and grows. Only the tip is ever needed here.
@@ -188,7 +190,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 deploy
+        run: npx --yes wrangler@4.136.3 deploy
 
       - name: Summary
         if: steps.meta.outputs.changed == 'true'

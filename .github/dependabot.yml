@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # SHA-pinned actions never float, so without this they would silently rot.
+  # Dependabot reads the "# v7.0.1" comment and bumps both SHA and comment.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
