@@ -36,7 +36,8 @@ OS Data Hub  ──monthly──►  GitHub Actions  ──►  git (5,088 chunk
 
 Nothing queries a database. The browser fetches two static files from the CDN
 and searches them itself; the Worker exists only so other callers get a JSON
-API, and runs the identical search over the same assets.
+API, and runs the identical search over the same assets, fronted by a rate
+limit and a KV cache that the page never touches.
 
 ### Lookup: two binary searches, one round trip
 
@@ -111,12 +112,59 @@ of CSV to **213 MiB on disk**, and a lookup from 128 KiB to about **43 KiB**.
 GET /api/uprn/{uprn}
 ```
 
+```json
+{ "uprn": "200004746037", "lat": 50.8776793, "lng": -1.8704281 }
+```
+
 404 if the UPRN is not in the dataset, 400 if it is not a safe integer, 405 for
-non-GET. CORS is open, so it is callable from anywhere. Responses are cached
-for a day.
+non-GET, 429 if rate limited. CORS is open, so it is callable from anywhere.
 
 The page does **not** use this endpoint — it fetches chunks directly from the
-CDN, so a lookup costs no Worker invocation.
+CDN, so a lookup costs no Worker invocation, and neither the rate limit nor the
+cache below can affect the app itself.
+
+### Rate limiting
+
+120 requests per minute per IP, via the Workers rate limiting binding. Over the
+limit returns 429 with `Retry-After: 60`.
+
+It is per-Cloudflare-location and documented as permissive and eventually
+consistent, so the cutoff is approximate — measured at 101 allowed and 39
+rejected out of 140. That is the intended behaviour for abuse control rather
+than accounting.
+
+It **fails open**: if the limiter is unavailable the request is served and the
+error logged. This is a public read-only lookup, so a limiter outage should not
+take the API down with it.
+
+Only `/api/*` is limited. Static assets, including the chunks the page reads,
+are never touched — a client hammering the API cannot lock anyone out of the
+site.
+
+### KV cache
+
+Successful lookups are cached in Workers KV, keyed `u:{dataset version}:{uprn}`.
+Including the version means a monthly refresh invalidates every entry without
+enumerating and deleting them. Entries also carry a 30-day TTL. Responses carry
+`x-cache: HIT` or `MISS`.
+
+Measured on the deployed Worker, averaged over six samples each:
+
+| | |
+|---|---|
+| `x-cache: HIT` | **111 ms** |
+| `x-cache: MISS` (full chunk path) | **391 ms** |
+
+The saving is real because isolates rotate: a miss often has to re-fetch and
+re-inflate a 43 KB chunk, which a hit skips entirely. A warm isolate that
+already holds the chunk can beat KV, but that is not the common case.
+
+Writes are wrapped in `waitUntil`, so caching never delays a response, and both
+reads and writes are non-fatal — a KV outage just means doing the lookup.
+
+**Only hits are cached.** Misses are cheap once a chunk is warm, and caching
+them would let a client enumerating nonexistent UPRNs burn the KV write quota
+(1M writes/month on Workers Paid).
 
 ## Layout
 

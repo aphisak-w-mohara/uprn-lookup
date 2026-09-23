@@ -3,5 +3,18 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
   "assets": { "directory": "./public", "binding": "ASSETS" },
+  "kv_namespaces": [
+    {
+      "binding": "UPRN_CACHE",
+      "id": "9ee76e84d461499fab62790ffe98e086"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "API_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
   "observability": { "enabled": true }
 }
