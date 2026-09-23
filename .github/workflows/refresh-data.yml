@@ -75,8 +75,12 @@ jobs:
           # generating chunks from a partial file.
           md5sum -c data.md5
           unzip -o -q data.zip -d raw
+          # The published archive stores restrictive Unix modes, so unzip on
+          # Linux leaves the CSV unreadable. macOS extraction does not.
+          chmod -R u+rwX raw
           csv=$(find raw -name 'osopenuprn_*.csv' -print -quit)
           [ -n "$csv" ] || { echo "::error::no osopenuprn_*.csv in the archive"; exit 1; }
+          [ -r "$csv" ] || { echo "::error::$csv is not readable after chmod"; exit 1; }
           echo "CSV_PATH=$csv" >> "$GITHUB_ENV"
           ls -l "$csv"
 
