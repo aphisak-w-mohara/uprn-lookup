@@ -215,12 +215,56 @@ async function lookup(file, targetStr) {
   return null;
 }
 
-/* ---------- Remote lookup (D1 via Worker, same origin) ---------- */
-async function apiLookup(uprn) {
-  const r = await fetch("/api/uprn/" + encodeURIComponent(uprn));
-  if (r.status === 404) return null;
-  if (!r.ok) throw new Error("API returned " + r.status + " " + r.statusText);
-  return await r.json();
+/* ---------- Hosted lookup: manifest + one fixed-width chunk ---------- */
+/* The dataset is sorted by UPRN and cut into 8192-record chunks of 16 bytes
+   each (uint64 uprn, int32 lat, int32 lng scaled by 1e7). manifest.bin holds
+   every chunk's first UPRN, so one binary search over it picks the single
+   chunk that can hold a UPRN. Fetched straight from the CDN - the Worker is
+   not involved, and the manifest is cached after the first lookup. */
+const REC = 16;
+let manifest = null;
+
+async function getManifest() {
+  if (!manifest) {
+    const r = await fetch("manifest.bin");
+    if (!r.ok) throw new Error("Could not load index (" + r.status + ")");
+    manifest = new BigUint64Array(await r.arrayBuffer());
+  }
+  return manifest;
+}
+
+function chunkFor(man, target) {
+  let lo = 0, hi = man.length - 1, found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (man[mid] <= target) { found = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return found;
+}
+
+async function hostedLookup(uprnStr) {
+  const target = BigInt(uprnStr);
+  const man = await getManifest();
+  const idx = chunkFor(man, target);
+  if (idx < 0) return null;
+  const r = await fetch("d/" + String(idx).padStart(4, "0") + ".bin");
+  if (!r.ok) throw new Error("Could not load data chunk (" + r.status + ")");
+  const dv = new DataView(await r.arrayBuffer());
+  let lo = 0, hi = dv.byteLength / REC - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const u = dv.getBigUint64(mid * REC, true);
+    if (u === target) {
+      return {
+        uprn: String(u),
+        lat: dv.getInt32(mid * REC + 8, true) / 1e7,
+        lng: dv.getInt32(mid * REC + 12, true) / 1e7,
+      };
+    }
+    if (u < target) lo = mid + 1; else hi = mid - 1;
+  }
+  return null;
 }
 
 /* ---------- Wiring ---------- */
@@ -345,8 +389,8 @@ async function search() {
   out.className = "msg"; out.textContent = "Searching…";
   const t0 = performance.now();
   try {
-    const via = file ? "local CSV" : "API";
-    const rec = file ? await lookup(file, raw) : await apiLookup(raw);
+    const via = file ? "local CSV" : "hosted index";
+    const rec = file ? await lookup(file, raw) : await hostedLookup(raw);
     if (!rec) {
       out.className = "msg err";
       out.textContent = "UPRN " + raw + " not found (" + via + ").";
@@ -386,7 +430,7 @@ async function runTests() {
   let pass = 0;
   for (const [uprn, want] of cases) {
     let got;
-    try { got = file ? await lookup(file, uprn) : await apiLookup(uprn); }
+    try { got = file ? await lookup(file, uprn) : await hostedLookup(uprn); }
     catch (e) { log(false, uprn + " threw: " + e.message); continue; }
     if (want === null) {
       if (log(got === null, uprn + " -> expected no match, got " + (got ? got.lat + "," + got.lng : "null"))) pass++;
