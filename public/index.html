@@ -78,24 +78,29 @@
 <body>
 <div class="wrap">
   <h1>UPRN Lookup</h1>
-  <p class="sub">OS Open UPRN &mdash; binary search straight off disk. Nothing is uploaded or imported.</p>
+  <p class="sub">Look up any UK UPRN. No download needed.</p>
 
   <div class="panel">
+    <div class="row">
+      <input id="q" type="text" inputmode="numeric" placeholder="Enter a UPRN, e.g. 906700601612" autocomplete="off">
+      <button id="go" class="primary">Look up</button>
+    </div>
+    <div id="result" class="msg"></div>
+  </div>
+
+  <details class="panel">
+    <summary style="cursor:pointer;font-size:0.9rem">Search a local CSV instead (offline)</summary>
+    <p class="sub" style="margin:12px 0">
+      Reads the OS Open UPRN CSV straight off your disk by binary search &mdash; nothing is
+      uploaded, nothing is imported. Useful offline, or to verify the API against source data.
+    </p>
     <div class="file-state">
-      <button id="pick" class="primary">Choose CSV&hellip;</button>
+      <button id="pick">Choose CSV&hellip;</button>
       <span id="fileName" class="file-name">No file selected</span>
     </div>
     <input id="fallbackInput" type="file" accept=".csv,text/csv" hidden>
     <div id="fileMsg" class="msg"></div>
-  </div>
-
-  <div class="panel">
-    <div class="row">
-      <input id="q" type="text" inputmode="numeric" placeholder="Enter a UPRN, e.g. 906700601612" autocomplete="off" disabled>
-      <button id="go" disabled>Look up</button>
-    </div>
-    <div id="result" class="msg"></div>
-  </div>
+  </details>
 
   <div id="map" class="hide"></div>
   <div id="links" class="links"></div>
@@ -210,6 +215,14 @@ async function lookup(file, targetStr) {
   return null;
 }
 
+/* ---------- Remote lookup (D1 via Worker, same origin) ---------- */
+async function apiLookup(uprn) {
+  const r = await fetch("/api/uprn/" + encodeURIComponent(uprn));
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error("API returned " + r.status + " " + r.statusText);
+  return await r.json();
+}
+
 /* ---------- Wiring ---------- */
 const $ = (id) => document.getElementById(id);
 let file = null, map = null, marker = null;
@@ -219,7 +232,6 @@ function setFile(f, note) {
   $("fileName").textContent = f.name + "  (" + (f.size / 1048576).toFixed(1) + " MB)";
   $("fileMsg").textContent = note || "";
   $("fileMsg").className = "msg";
-  $("q").disabled = false; $("go").disabled = false;
   $("q").focus();
 }
 function fileErr(m) { $("fileMsg").textContent = m; $("fileMsg").className = "msg err"; }
@@ -295,8 +307,6 @@ function render(rec) {
     ["UPRN", rec.uprn],
     ["Latitude", rec.lat.toFixed(7)],
     ["Longitude", rec.lng.toFixed(7)],
-    ["Easting (BNG)", String(rec.easting)],
-    ["Northing (BNG)", String(rec.northing)],
     ["Lat, Lng", rec.lat.toFixed(7) + ", " + rec.lng.toFixed(7)],
   ];
   for (const [k, v] of fields) {
@@ -335,16 +345,17 @@ async function search() {
   out.className = "msg"; out.textContent = "Searching…";
   const t0 = performance.now();
   try {
-    const rec = await lookup(file, raw);
+    const via = file ? "local CSV" : "API";
+    const rec = file ? await lookup(file, raw) : await apiLookup(raw);
     if (!rec) {
       out.className = "msg err";
-      out.textContent = "UPRN " + raw + " is not in this file.";
+      out.textContent = "UPRN " + raw + " not found (" + via + ").";
       $("map").classList.add("hide");
       return;
     }
     render(rec);
     out.insertAdjacentHTML("beforeend",
-      '<p class="sub" style="margin:12px 0 0">Found in ' + (performance.now() - t0).toFixed(0) + " ms</p>");
+      '<p class="sub" style="margin:12px 0 0">Found in ' + (performance.now() - t0).toFixed(0) + " ms via " + via + "</p>");
   } catch (e) {
     out.className = "msg err"; out.textContent = e.message;
   }
@@ -375,7 +386,7 @@ async function runTests() {
   let pass = 0;
   for (const [uprn, want] of cases) {
     let got;
-    try { got = await lookup(file, uprn); }
+    try { got = file ? await lookup(file, uprn) : await apiLookup(uprn); }
     catch (e) { log(false, uprn + " threw: " + e.message); continue; }
     if (want === null) {
       if (log(got === null, uprn + " -> expected no match, got " + (got ? got.lat + "," + got.lng : "null"))) pass++;
@@ -391,11 +402,7 @@ async function runTests() {
 }
 
 restore().then(() => {
-  if (new URLSearchParams(location.search).get("test") === "1") {
-    if (file) runTests();
-    else $("fileMsg").textContent = "Choose the CSV to run the self-check.";
-    $("fallbackInput").addEventListener("change", () => setTimeout(runTests, 100), { once: true });
-  }
+  if (new URLSearchParams(location.search).get("test") === "1") runTests();
 });
 </script>
 </body>

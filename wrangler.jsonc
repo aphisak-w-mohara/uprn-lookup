@@ -1,0 +1,14 @@
+{
+  "name": "uprn-lookup",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "uprn",
+      "database_id": "6ffe4ce1-d7b9-4b0f-8003-4e4dbf342f90"
+    }
+  ],
+  "observability": { "enabled": true }
+}
