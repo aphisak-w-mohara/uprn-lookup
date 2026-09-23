@@ -1,0 +1,10 @@
+# Chunk paths are stable across releases, so the content at /d/NNNN.bin
+# changes when OS publishes. "immutable" would therefore serve stale
+# coordinates for a year after a refresh. A day of freshness plus background
+# revalidation matches a dataset that moves monthly.
+/d/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=2592000
+/manifest.bin
+  Cache-Control: public, max-age=86400, stale-while-revalidate=2592000
+/version.json
+  Cache-Control: public, max-age=300
