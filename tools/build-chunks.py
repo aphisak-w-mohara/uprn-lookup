@@ -40,6 +40,20 @@ SCALE = 10_000_000
 GZIP_LEVEL = 9
 
 
+# CPython writes the gzip header's OS byte from the build platform: 3 on
+# Linux, 255 on macOS. That single byte made every chunk differ between a
+# local build and the CI runner, so an otherwise byte-identical rebuild
+# rewrote all 5,088 files and cost ~213 MiB of git history. Pin it to the
+# Unix code the runner already emits, so local and CI output match exactly.
+GZIP_OS_BYTE = 3
+
+
+def gz(payload: bytes) -> bytes:
+    blob = bytearray(gzip.compress(payload, GZIP_LEVEL, mtime=0))
+    blob[9] = GZIP_OS_BYTE
+    return bytes(blob)
+
+
 def pack_chunk(uprns, lats, lngs):
     n = len(uprns)
     gaps = [uprns[i] - uprns[i - 1] for i in range(1, n)]
@@ -72,7 +86,7 @@ def main() -> int:
         if not u:
             return
         payload = pack_chunk(u, la, ln)
-        blob = gzip.compress(payload, GZIP_LEVEL, mtime=0)
+        blob = gz(payload)
         with open(os.path.join(ddir, f"{chunks:04d}.bin"), "wb") as fh:
             fh.write(blob)
         raw_total += len(payload)
@@ -104,7 +118,7 @@ def main() -> int:
 
     # Float64 is exact to 2^53 and the largest UPRN is ~9.07e11, so the reader
     # can search this as a Float64Array without BigInt.
-    man = gzip.compress(struct.pack(f"<{len(firsts)}d", *firsts), GZIP_LEVEL, mtime=0)
+    man = gz(struct.pack(f"<{len(firsts)}d", *firsts))
     with open(os.path.join(out, "manifest.bin"), "wb") as fh:
         fh.write(man)
 
