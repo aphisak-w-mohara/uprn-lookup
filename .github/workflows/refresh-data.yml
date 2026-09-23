@@ -101,15 +101,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$CSV_PATH" <<'PY'
-          import os, random, struct, sys
+          import gzip, os, random, struct, sys
           csv_path = sys.argv[1]
 
-          man = open("public/manifest.bin", "rb").read()
-          firsts = struct.unpack(f"<{len(man)//8}Q", man)
+          man = gzip.decompress(open("public/manifest.bin", "rb").read())
+          firsts = struct.unpack(f"<{len(man)//8}d", man)
           chunks = sorted(f for f in os.listdir("public/d") if f.endswith(".bin"))
           assert len(chunks) == len(firsts), f"{len(chunks)} chunks vs {len(firsts)} manifest entries"
 
-          total = sum(len(open(f"public/d/{c}", "rb").read()) for c in chunks) // 16
+          def load(idx):
+              raw = gzip.decompress(open(f"public/d/{idx:04d}.bin", "rb").read())
+              n = len(raw) // 16
+              gaps = struct.unpack_from(f"<{n}Q", raw, 0)
+              uprn, acc = [], 0
+              for i, g in enumerate(gaps):
+                  acc = g if i == 0 else acc + g
+                  uprn.append(acc)
+              lat = struct.unpack_from(f"<{n}i", raw, 8 * n)
+              lng = struct.unpack_from(f"<{n}i", raw, 12 * n)
+              return uprn, lat, lng
+
+          total = 0
+          for c in chunks:
+              total += len(gzip.decompress(open(f"public/d/{c}", "rb").read())) // 16
           print(f"{len(chunks)} chunks, {total:,} records")
 
           # Uniform sample across the whole file, not just the head.
@@ -125,6 +139,7 @@ jobs:
                           break
           assert len(picked) == 40, f"only sampled {len(picked)} rows"
 
+          cache = {}
           def lookup(target):
               lo, hi, found = 0, len(firsts) - 1, -1
               while lo <= hi:
@@ -132,13 +147,13 @@ jobs:
                   if firsts[mid] <= target: found, lo = mid, mid + 1
                   else: hi = mid - 1
               if found < 0: return None
-              data = open(f"public/d/{found:04d}.bin", "rb").read()
-              lo, hi = 0, len(data) // 16 - 1
+              if found not in cache: cache[found] = load(found)
+              uprn, lat, lng = cache[found]
+              lo, hi = 0, len(uprn) - 1
               while lo <= hi:
                   mid = (lo + hi) // 2
-                  u, la, ln = struct.unpack_from("<Qii", data, mid * 16)
-                  if u == target: return la, ln
-                  if u < target: lo = mid + 1
+                  if uprn[mid] == target: return lat[mid], lng[mid]
+                  if uprn[mid] < target: lo = mid + 1
                   else: hi = mid - 1
               return None
 

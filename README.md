@@ -10,32 +10,46 @@ server-side search.
 The OS Open UPRN release is 41,676,575 rows and 2.1GB of CSV, sorted ascending
 by UPRN. Two things follow from that.
 
-First, the CSV is wasteful. Each row becomes a fixed 16-byte record — `uint64`
-UPRN, then latitude and longitude as `int32` scaled by 1e7. The source has 7
-decimal places, so the scaled integers are lossless, and the whole dataset
-drops from 2168 MiB to **636 MiB**. Fixed width also means record *i* sits at
-exactly `i*16`, so searching within a chunk is index arithmetic rather than
-line parsing.
+First, the CSV is wasteful. Each row becomes 16 bytes — the UPRN, then latitude
+and longitude as `int32` scaled by 1e7. The source has 7 decimal places, so the
+scaled integers are lossless.
 
 Second, because it is sorted, you never need to look at most of it. The data is
-cut into 5,088 chunks of 8192 records (128 KiB each), and `manifest.bin` holds
-the first UPRN of every chunk — 40 KiB total. A binary search over the manifest
-identifies the one chunk that can contain a given UPRN.
+cut into 5,088 chunks of 8192 records, and `manifest.bin` holds the first UPRN
+of every chunk. A binary search over the manifest identifies the one chunk that
+can contain a given UPRN.
 
-So a lookup is: binary search 40 KiB in memory, fetch one 128 KiB chunk,
-binary search 8192 records inside it.
+So a lookup is: binary search the manifest in memory, fetch one chunk, binary
+search 8192 records inside it. **One network round trip**, around 40 ms warm,
+served from the Cloudflare edge rather than a single region.
 
-**One network round trip.** The manifest is cached after the first lookup, and
-chunks are served from the Cloudflare edge rather than a single region. A warm
-lookup measures around 40 ms.
+### Chunk layout
 
-Chunks transfer uncompressed: Cloudflare compresses `text/*` but not
-`application/octet-stream`, so a lookup costs the full 128 KiB rather than the
-~52 KiB the data would gzip to. They are cached by both the browser and the
-edge, so this is a one-off per chunk. Halving `RECORDS_PER_CHUNK` to 4096 would
-halve the transfer at the cost of 10,176 files — still far under the 100,000
-per-deployment limit — but regenerating adds another full copy of the data to
-git history, so it is not worth doing for its own sake.
+Chunks store three columns rather than interleaved rows, so each column wraps
+in a typed array with no per-record parsing. With `n = payloadLength / 16`:
+
+```
+offset 0     uint64          first UPRN, absolute
+offset 8     uint64 x (n-1)  gaps to the next UPRN
+offset 8n    int32  x n      latitude,  scaled 1e7
+offset 12n   int32  x n      longitude, scaled 1e7
+```
+
+Gaps are `uint64`, not `uint32`. The largest gap in the 2026-09 release is
+484,699,856,906 — 113x past `uint32` — and ten gaps exceed it, so a narrower
+field would silently corrupt those records. The extra bytes are almost all
+leading zeros, which is exactly what gzip removes, so it costs nothing.
+
+UPRNs are read as `Float64`: exact to 2^53, the largest is ~9.07e11, and it
+benchmarks faster than `BigUint64Array` (22 ns vs 26 ns per search) while
+keeping BigInt out of the hot path entirely.
+
+Payloads are gzipped on disk and inflated by the client with
+`DecompressionStream`. That is not a preference — Cloudflare does not compress
+`application/octet-stream`, and setting `Content-Encoding: gzip` by hand does
+not make browsers decode it either, so compression has to be explicit on both
+ends. Together the columnar layout and delta encoding take the dataset from
+636 MiB to **213 MiB**, and a lookup from 128 KiB to about **43 KiB**.
 
 ## API
 
