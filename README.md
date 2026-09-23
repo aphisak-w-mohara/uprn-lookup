@@ -5,25 +5,63 @@ server-side search.
 
 **https://uprn-lookup.aphisak.workers.dev**
 
-## How it works
+```bash
+curl -s https://uprn-lookup.aphisak.workers.dev/api/uprn/200004746037
+```
 
-The OS Open UPRN release is 41,676,575 rows and 2.1GB of CSV, sorted ascending
-by UPRN. Two things follow from that.
+```json
+{ "uprn": "200004746037", "lat": 50.8776793, "lng": -1.8704281 }
+```
 
-First, the CSV is wasteful. Each row becomes 16 bytes — the UPRN, then latitude
-and longitude as `int32` scaled by 1e7. The source has 7 decimal places, so the
-scaled integers are lossless.
+## The problem
 
-Second, because it is sorted, you never need to look at most of it. The data is
-cut into 5,088 chunks of 8192 records, and `manifest.bin` holds the first UPRN
-of every chunk. A binary search over the manifest identifies the one chunk that
-can contain a given UPRN.
+OS Open UPRN is 41,676,575 rows and 2.1GB of CSV. That fits nowhere convenient:
+GitHub blocks files over 100 MiB, Git LFS caps at 2 GiB (the file is 2.118),
+GitHub Pages allows 1 GiB per site, and Cloudflare Pages allows 25 MiB per
+file. Shipping the raw file to every visitor was the first design and it was
+the wrong one — a 2.1GB download before the page does anything.
 
-So a lookup is: binary search the manifest in memory, fetch one chunk, binary
-search 8192 records inside it. **One network round trip**, around 40 ms warm,
-served from the Cloudflare edge rather than a single region.
+Two properties of the data make it unnecessary. It is sorted ascending by
+UPRN, and each row is five numbers.
 
-### Chunk layout
+## Architecture
+
+```
+OS Data Hub  ──monthly──►  GitHub Actions  ──►  git (5,088 chunks)
+                                │
+                                └──►  Cloudflare Workers
+                                        ├── static assets  ◄── browser fetches directly
+                                        └── Worker         ◄── /api/* for other callers
+```
+
+Nothing queries a database. The browser fetches two static files from the CDN
+and searches them itself; the Worker exists only so other callers get a JSON
+API, and runs the identical search over the same assets.
+
+### Lookup: two binary searches, one round trip
+
+`manifest.bin` holds the first UPRN of each chunk, so one binary search over it
+identifies the single chunk that can contain a given UPRN. A second binary
+search inside that chunk finds the record.
+
+Worked example for `200004746037`:
+
+| step | where | cost |
+|---|---|---|
+| binary search manifest, 5,088 entries | memory | 12 probes |
+| fetch `d/5004.bin` | **network** | 55 KB, one round trip |
+| binary search chunk, 8,192 records | memory | 13 probes |
+| decode 16 bytes at offset 115,680 | memory | — |
+
+25 comparisons, **one network request**, ~40 ms warm. The manifest is cached
+after the first lookup, and chunks are served from the nearest Cloudflare edge
+rather than a single region.
+
+### Record and chunk layout
+
+Each row becomes 16 bytes: the UPRN, then latitude and longitude as `int32`
+scaled by 1e7. The source carries 7 decimal places, so the scaling is lossless
+— and `int32` holds it, since `180 * 1e7` is inside `2^31`.
 
 Chunks store three columns rather than interleaved rows, so each column wraps
 in a typed array with no per-record parsing. With `n = payloadLength / 16`:
@@ -35,113 +73,134 @@ offset 8n    int32  x n      latitude,  scaled 1e7
 offset 12n   int32  x n      longitude, scaled 1e7
 ```
 
-Gaps are `uint64`, not `uint32`. The largest gap in the 2026-09 release is
-484,699,856,906 — 113x past `uint32` — and ten gaps exceed it, so a narrower
-field would silently corrupt those records. The extra bytes are almost all
-leading zeros, which is exactly what gzip removes, so it costs nothing.
+`n` is derived from the payload length, so there is no header to pad around.
 
-UPRNs are read as `Float64`: exact to 2^53, the largest is ~9.07e11, and it
-benchmarks faster than `BigUint64Array` (22 ns vs 26 ns per search) while
-keeping BigInt out of the hot path entirely.
+**Gaps are `uint64`, not `uint32`.** The largest gap in the 2026-09 release is
+484,699,856,906 — 113x past `uint32` — and ten gaps exceed it. A narrower field
+would silently corrupt those ten records while still passing a sampled check.
+The wasted bytes are leading zeros, which is exactly what gzip removes, so the
+safe field is effectively free. Varint encoding was measured at 0.3pp better
+and gives up random access, so it was not worth it.
 
-Payloads are gzipped on disk and inflated by the client with
-`DecompressionStream`. That is not a preference — Cloudflare does not compress
-`application/octet-stream`, and setting `Content-Encoding: gzip` by hand does
-not make browsers decode it either, so compression has to be explicit on both
-ends. Together the columnar layout and delta encoding take the dataset from
-636 MiB to **213 MiB**, and a lookup from 128 KiB to about **43 KiB**.
+**UPRNs are read as `Float64`.** Exact to `2^53` against a largest UPRN of
+~9.07e11, and it benchmarks at 22 ns per search versus 26 ns for
+`BigUint64Array` and 33 ns for `DataView.getBigUint64` — with no BigInt in the
+hot path.
+
+**Payloads are gzipped on disk and inflated with `DecompressionStream`.** This
+is not a preference. Cloudflare does not compress `application/octet-stream`,
+and setting `Content-Encoding: gzip` by hand does not make browsers decode it
+either — verified against the deployed site, which returns the header and the
+raw gzip bytes. So compression has to be explicit at both ends.
+
+Together, the columnar layout and delta encoding take the dataset from 2168 MiB
+of CSV to **213 MiB on disk**, and a lookup from 128 KiB to about **43 KiB**.
+
+### Why not the obvious alternatives
+
+| | why not |
+|---|---|
+| Cloudflare D1 | Fits (798 MiB against a 10 GB cap) and was built, but `wrangler` pins a database to one region — ours landed in APAC, so every UK lookup would cross to Asia-Pacific. Refreshing also costs 41.6M row writes, roughly $33 a month. |
+| One big file + HTTP Range | How PMTiles works, and it would mean 26 files instead of 5,088. Workers Static Assets **ignores `Range`** — verified: a range request returns HTTP 200 and the whole file. Also 25 MiB per file. Would require R2. |
+| Data in Git LFS | Free quota is 10 GiB storage and bandwidth, so it fits. But LFS stores objects raw while git zlib-packs them, so a clone would be *larger* today. It only wins after about two monthly refreshes. |
+| Ship the CSV to the browser | 2.1GB per visitor. |
 
 ## API
 
 ```
-GET /api/uprn/906700601612
+GET /api/uprn/{uprn}
 ```
 
-```json
-{
-  "uprn": "906700601612",
-  "lat": 55.8823426,
-  "lng": -4.2786558
-}
+404 if the UPRN is not in the dataset, 400 if it is not a safe integer, 405 for
+non-GET. CORS is open, so it is callable from anywhere. Responses are cached
+for a day.
+
+The page does **not** use this endpoint — it fetches chunks directly from the
+CDN, so a lookup costs no Worker invocation.
+
+## Layout
+
+```
+public/
+  index.html        the app; also the API-free local CSV mode
+  manifest.bin      gzipped Float64Array of each chunk's first UPRN
+  version.json      dataset provenance, rewritten by CI
+  _headers          cache policy for chunks
+  d/0000.bin ...    5,088 gzipped columnar chunks
+src/worker.js       /api/* — same search, over the asset binding
+tools/build-chunks.py   CSV -> chunks + manifest
 ```
 
-404 if the UPRN is not in the dataset, 400 if it is longer than 12 digits.
-CORS is open, so it is callable from anywhere.
+## Automation
 
-The Worker runs the same search as the browser, reading chunks through its
-static-asset binding. The page itself does not use the API — it fetches chunks
-directly from the CDN, so a lookup costs no Worker invocation.
+Two workflows, both pinning `actions/checkout` by commit SHA and `wrangler` by
+version, because both hold a deploy token.
 
-## Rebuilding the data
+**`refresh-data.yml`** — monthly, on the 8th, plus manual with a `force` input.
+It compares the md5 published by the OS API against `version.json` **before
+downloading anything**. Every release replaces all 5,088 chunks, so a rebuild
+producing identical bytes would still cost ~213 MiB of history; the gate makes
+an unchanged month exit in about 30 seconds. When the dataset has moved it
+verifies the download against the published md5 before unzipping, rebuilds,
+samples 40 rows uniformly from the source CSV and looks each one up through the
+generated chunks, and only then commits and deploys.
 
-Chunks are committed, but they are reproducible. Download **OS Open UPRN**
-(CSV) from [OS Data Hub](https://osdatahub.os.uk/downloads/open/OpenUPRN), then:
+**`deploy.yml`** — on pushes to `main` touching `public/`, `src/` or
+`wrangler.jsonc`. After deploying it smoke-tests the live URL against known
+coordinates for a first, last and missing UPRN. A deploy that returns 200 while
+serving wrong bytes is the failure worth catching, and a status check would not
+catch it.
+
+The refresh workflow deploys from its own job rather than relying on
+`deploy.yml`: pushes made with `GITHUB_TOKEN` do not trigger workflows, so its
+commit would never reach it. That is also why there is no loop.
+
+Requires two repository secrets: `CLOUDFLARE_API_TOKEN` (Workers → Editor) and
+`CLOUDFLARE_ACCOUNT_ID`.
+
+### Reproducibility
+
+Builds are byte-identical across platforms, which is what lets an unchanged
+dataset commit nothing. That needed one fix: CPython writes the gzip header's
+OS byte from the build platform — 3 on Linux, 255 on macOS — so a local rebuild
+and a CI rebuild differed in exactly one byte per file, and git saw all 5,088
+as changed. The generator pins that byte.
+
+### Repository size
+
+Each release replaces every chunk and git history is append-only, so a refresh
+costs ~213 MiB that never goes away — against GitHub's 5 GB soft limit.
+
+If that becomes a problem, delete the `Commit` step from `refresh-data.yml` and
+gitignore `public/d/` and `public/manifest.bin`. The data is fully reproducible
+from the OS download, `wrangler deploy` uploads from the working tree, and the
+repository stops growing. The only thing lost is having past releases' exact
+bytes in git.
+
+## Rebuilding by hand
+
+Download **OS Open UPRN** (CSV) from
+[OS Data Hub](https://osdatahub.os.uk/downloads/open/OpenUPRN), then:
 
 ```bash
 python3 tools/build-chunks.py path/to/osopenuprn_*.csv public
+wrangler deploy
 ```
 
 The generator asserts the input is strictly ascending and exits if it is not —
 the binary search depends on that property, so it is checked rather than
 assumed.
 
-## Refreshing the data
-
-OS publishes OS Open UPRN monthly. `.github/workflows/refresh-data.yml` runs on
-the 8th of each month, and can be triggered by hand with a `force` option.
-
-It checks the published md5 against `public/version.json` **before downloading
-anything**. An unchanged dataset means the job exits in a few seconds without
-committing — otherwise every month would add another identical ~254 MiB to git
-history.
-
-When the dataset has changed it downloads the zip, verifies the md5, rebuilds
-the chunks, samples 40 rows uniformly from the source CSV and looks each one up
-through the generated chunks, and only then commits and deploys.
-
-Requires two repository secrets: `CLOUDFLARE_API_TOKEN` (needs Workers Scripts
-edit) and `CLOUDFLARE_ACCOUNT_ID`.
-
-### A note on repository size
-
-Each refresh replaces every chunk, because UPRNs shift, and git history is
-append-only. That is roughly 254 MiB per release that never goes away — about
-3 GiB a year, against GitHub's 5 GB soft limit.
-
-If that becomes a problem, delete the `Commit` step from the workflow and
-gitignore `public/d/` and `public/manifest.bin`. The data is fully reproducible
-from the OS download, `wrangler deploy` uploads from the working tree, and the
-repository stops growing. The only thing lost is having the exact bytes of past
-releases in git.
-
-## Deploying
-
-Pushes to `main` that touch `public/`, `src/` or `wrangler.jsonc` deploy
-automatically via `.github/workflows/deploy.yml`, which then smoke-tests the
-live URL against known coordinates — a green deploy serving wrong bytes is the
-failure worth catching.
-
-The refresh workflow deploys from its own job rather than relying on that one:
-pushes made with `GITHUB_TOKEN` do not trigger workflows, so its commit would
-never reach it.
-
-By hand:
-
-```bash
-wrangler deploy
-```
-
-Uploads from the working tree, so Cloudflare never clones the repo.
-
 ## Tests
 
-Open `/?test=1`. It asserts the first row, the last row, a
-duplicate-coordinate pair, chunk-boundary UPRNs, an interior gap, and values
-above and below the range.
+Open `/?test=1`. It asserts the first row, the last row, a duplicate-coordinate
+pair, an interior gap, and values above and below the range, against whichever
+source is active.
 
-The same assertions run headlessly against the generated chunks with `sed` as
-ground truth — 76 checks including a 60-line random sweep, all exact, and it
-confirms the one-fetch-per-lookup property.
+Headless verification extracts the page's own search function and runs it
+against the generated chunks with `sed` as ground truth, covering chunk
+boundaries, the 484-billion gap in chunk 5026, and a random sweep. CI runs a
+40-row uniform sample on every rebuild.
 
 ## Local CSV mode
 
@@ -153,13 +212,13 @@ which makes it the way to check the hosted index against ground truth.
 ## Scope
 
 Lookup is UPRN → coordinates, because that is all the source contains. Its five
-columns are `UPRN, X_COORDINATE, Y_COORDINATE, LATITUDE, LONGITUDE` — no
-addresses. Searching by postcode or address needs a second dataset: ONSUD
+columns are `UPRN, X_COORDINATE, Y_COORDINATE, LATITUDE, LONGITUDE` — there are
+no addresses. Searching by postcode or address needs a second dataset: ONSUD
 (free, UPRN → postcode) or AddressBase (licensed, full addresses).
 
 Easting and northing are not served. They are OSTN15 values in the source, and
-re-deriving them from lat/lng client-side lands about a metre off. Restoring
-them means widening the record to 24 bytes and regenerating.
+re-deriving them from lat/lng lands about a metre off. Restoring them means
+widening the record and regenerating.
 
 ## Licence
 
