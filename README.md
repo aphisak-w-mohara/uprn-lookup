@@ -35,8 +35,8 @@ OS Data Hub ──monthly──► GitHub Actions ──► git ──push──
                                               ┌─────────── Worker ───────────┐
    browser ──────────────────────────────────►│  static assets               │
      fetches manifest + one chunk directly    │    index.html                │
-     no Worker invocation                     │    manifest.bin  17 KB       │
-                                              │    d/0000..5087.bin  213 MiB │
+     no Worker invocation                     │    version.json  → pointer   │
+                                              │    d/2026-09/  213 MiB       │
                                               │                              │
    other callers ─── GET /api/uprn/{id} ─────►│  rate limit  120/min/IP      │
                                               │       ▼                      │
@@ -132,6 +132,37 @@ raw gzip bytes. So compression has to be explicit at both ends.
 Together, the columnar layout and delta encoding take the dataset from 2168 MiB
 of CSV to **213 MiB on disk**, and a lookup from 128 KiB to about **43 KiB**.
 
+### Versioned paths
+
+Data lives under `d/<version>/`, and `version.json` is the only thing that
+points at it.
+
+This fixes a correctness bug, not a performance one. Chunk boundaries shift
+whenever OS inserts a UPRN. With stable paths, a client could hold the new
+manifest alongside a chunk cached from the previous release, route a lookup to
+the wrong chunk, and report a UPRN that exists as **not found**. Reproduced
+against the real data: moving one boundary by a single record sends
+`200004725644` to chunk 5003, whose range ends at `200004725642`.
+
+With the version in the path, a file's contents can never change, so every data
+file is cached for a year as `immutable`. More importantly, a client can only
+ever reach one release's manifest and chunks together — even a stale cached
+response is internally consistent, because an old `version.json` only leads to
+that same old release.
+
+| | cache policy |
+|---|---|
+| `d/<version>/*` | `max-age=31536000, immutable` |
+| `version.json` | `max-age=300, must-revalidate` |
+
+The page reuses the single `version.json` request it already makes for the
+footer, so this costs no extra round trip. A tab left open across a deploy will
+404 on the removed release; it re-reads `version.json` and retries once.
+
+Restructuring cost 1 MiB of git history rather than another 213 MiB: rebuilds
+are byte-identical, so git recognised all 5,089 moves as renames of existing
+blobs.
+
 ### Why not the obvious alternatives
 
 | | why not |
@@ -206,10 +237,11 @@ them would let a client enumerating nonexistent UPRNs burn the KV write quota
 ```
 public/
   index.html        the app; also the API-free local CSV mode
-  manifest.bin      gzipped Float64Array of each chunk's first UPRN
-  version.json      dataset provenance, rewritten by CI
-  _headers          cache policy for chunks
-  d/0000.bin ...    5,088 gzipped columnar chunks
+  version.json      points at the current release; rewritten by CI
+  _headers          cache policy: data immutable, pointer short-lived
+  d/<version>/
+    manifest.bin    gzipped Float64Array of each chunk's first UPRN
+    0000.bin ...    5,088 gzipped columnar chunks
 src/worker.js       /api/* — rate limit, KV cache, same search
 tools/build-chunks.py   CSV -> chunks + manifest
 wrangler.jsonc      bindings: ASSETS, UPRN_CACHE (KV), API_LIMITER
@@ -217,6 +249,34 @@ wrangler.jsonc      bindings: ASSETS, UPRN_CACHE (KV), API_LIMITER
 
 Bindings are declared in `wrangler.jsonc`; the KV namespace id is in there and
 the deploy token lives in repository secrets.
+
+## Limits and headroom
+
+The binary search never becomes the bottleneck — doubling the data adds one
+probe. The ceilings are everything around it. Measured or checked against the
+current deployment, which runs on Workers Paid:
+
+| constraint | Free | Paid | this site | headroom |
+|---|---|---|---|---|
+| static files per Worker version | 20,000 | 100,000 | 5,091 | 3.9x Free, 19.6x Paid |
+| rows that fit, at 8,192 per chunk | ~164M | ~819M | 41.7M | — |
+| max file size | 25 MiB | 25 MiB | 55 KB | — |
+| CPU per request | 10 ms | 30 s | **0.48 ms** per cold API miss | 20x Free |
+| API requests | 100k/day | unmetered | page doesn't count | — |
+| KV writes | 1,000/day | 1M/month | one per new UPRN | — |
+
+On CPU: an uncached API lookup gunzips a 43 KB chunk and rebuilds 8,192 UPRNs
+from their gaps. That measures 0.47 ms to inflate and 0.01 ms to decode —
+typed arrays over a decompressed buffer avoid any per-record parsing — so it is
+nowhere near the Free tier's 10 ms cap.
+
+On file count: a second index (by postcode or location) or bigger chunks would
+eat into the Free headroom first. Larger chunks buy room at the cost of heavier
+downloads per lookup.
+
+On the Free plan, KV would stop accepting writes after about a thousand
+distinct lookups a day. KV errors are non-fatal in the Worker, so that would
+make the API slower rather than broken.
 
 ## Automation
 
@@ -255,14 +315,24 @@ as changed. The generator pins that byte.
 
 ### Repository size
 
-Each release replaces every chunk and git history is append-only, so a refresh
-costs ~213 MiB that never goes away — against GitHub's 5 GB soft limit.
+**This is the real long-term constraint.** Each release replaces every chunk,
+git history is append-only, and gzipped data cannot be delta-compressed, so a
+refresh adds ~213 MiB that never goes away. `.git` is 518 MiB today:
 
-If that becomes a problem, delete the `Commit` step from `refresh-data.yml` and
-gitignore `public/d/` and `public/manifest.bin`. The data is fully reproducible
-from the OS download, `wrangler deploy` uploads from the working tree, and the
-repository stops growing. The only thing lost is having past releases' exact
-bytes in git.
+| GitHub guidance | reached in |
+|---|---|
+| 1 GB, ideal | ~2.4 months |
+| 5 GB, strongly recommended maximum | ~1.8 years |
+| 10 GB, recommended `.git` maximum | ~3.8 years |
+
+Clones get slower the whole way. Pushes are not the issue — one release is
+~213 MB against a 2 GB push limit.
+
+The fix is small: delete the `Commit` step from `refresh-data.yml` and
+gitignore `public/d/`. The data is fully reproducible from the OS download, and
+`wrangler deploy` uploads from the CI working tree, so nothing about serving
+changes. The repository stops growing and holds only code. What is lost is
+having past releases' exact bytes in git.
 
 ## Rebuilding by hand
 
