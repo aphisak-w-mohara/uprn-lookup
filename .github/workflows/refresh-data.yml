@@ -90,9 +90,9 @@ jobs:
         if: steps.meta.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          python3 tools/build-chunks.py "$CSV_PATH" public | tee build.log
+          python3 tools/build-chunks.py "$CSV_PATH" public "${{ steps.meta.outputs.version }}" | tee build.log
           rows=$(grep -oE '^[0-9,]+ rows' build.log | tr -d ', rows')
-          chunks=$(ls public/d/*.bin | wc -l | tr -d ' ')
+          chunks=$(ls public/d/*/[0-9]*.bin | wc -l | tr -d ' ')
           echo "ROWS=$rows"     >> "$GITHUB_ENV"
           echo "CHUNKS=$chunks" >> "$GITHUB_ENV"
 
@@ -100,31 +100,29 @@ jobs:
         if: steps.meta.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          python3 - "$CSV_PATH" <<'PY'
+          python3 - "$CSV_PATH" "${{ steps.meta.outputs.version }}" <<'PY'
           import gzip, os, random, struct, sys
-          csv_path = sys.argv[1]
+          csv_path, version = sys.argv[1], sys.argv[2]
+          ddir = f"public/d/{version}"
+          assert os.path.isdir(ddir), f"{ddir} missing - generator did not use the published version"
 
-          man = gzip.decompress(open("public/manifest.bin", "rb").read())
+          man = gzip.decompress(open(f"{ddir}/manifest.bin", "rb").read())
           firsts = struct.unpack(f"<{len(man)//8}d", man)
-          chunks = sorted(f for f in os.listdir("public/d") if f.endswith(".bin"))
+          chunks = sorted(f for f in os.listdir(ddir) if f[0].isdigit() and f.endswith(".bin"))
           assert len(chunks) == len(firsts), f"{len(chunks)} chunks vs {len(firsts)} manifest entries"
 
           def load(idx):
-              raw = gzip.decompress(open(f"public/d/{idx:04d}.bin", "rb").read())
+              raw = gzip.decompress(open(f"{ddir}/{idx:04d}.bin", "rb").read())
               n = len(raw) // 16
               gaps = struct.unpack_from(f"<{n}Q", raw, 0)
               uprn, acc = [], 0
               for i, g in enumerate(gaps):
                   acc = g if i == 0 else acc + g
                   uprn.append(acc)
-              lat = struct.unpack_from(f"<{n}i", raw, 8 * n)
-              lng = struct.unpack_from(f"<{n}i", raw, 12 * n)
-              return uprn, lat, lng
+              return uprn, struct.unpack_from(f"<{n}i", raw, 8*n), struct.unpack_from(f"<{n}i", raw, 12*n)
 
-          total = 0
-          for c in chunks:
-              total += len(gzip.decompress(open(f"public/d/{c}", "rb").read())) // 16
-          print(f"{len(chunks)} chunks, {total:,} records")
+          total = sum(len(gzip.decompress(open(f"{ddir}/{c}", "rb").read())) // 16 for c in chunks)
+          print(f"{len(chunks)} chunks in d/{version}/, {total:,} records")
 
           # Uniform sample across the whole file, not just the head.
           want_idx = sorted(random.sample(range(total), 40))

@@ -31,23 +31,25 @@ async function assetBytes(env, request, path) {
   return gunzip(await res.arrayBuffer());
 }
 
-// Cache keys carry the dataset version, so a refresh invalidates every entry
-// without needing to enumerate and delete them.
+// Data files live under /d/<version>/, so the version is needed before any
+// of them can be read. It also keys the KV cache, so a refresh invalidates
+// every entry without needing to enumerate and delete them.
 async function getVersion(env, request) {
   if (dataVersion) return dataVersion;
-  try {
-    const res = await env.ASSETS.fetch(new URL("/version.json", request.url));
-    dataVersion = res.ok ? ((await res.json()).version || "unknown") : "unknown";
-  } catch {
-    dataVersion = "unknown";
-  }
+  const res = await env.ASSETS.fetch(new URL("/version.json", request.url));
+  if (!res.ok) throw new Error(`version.json -> ${res.status}`);
+  const v = (await res.json()).version;
+  if (!v) throw new Error("version.json has no version");
+  dataVersion = v;
   return dataVersion;
 }
 
 // Float64 is exact to 2^53 and the largest UPRN is ~9.07e11, so the whole
 // search runs on plain numbers - no BigInt in the hot path.
-async function getManifest(env, request) {
-  if (!manifest) manifest = new Float64Array(await assetBytes(env, request, "/manifest.bin"));
+async function getManifest(env, request, version) {
+  if (!manifest) {
+    manifest = new Float64Array(await assetBytes(env, request, `/d/${version}/manifest.bin`));
+  }
   return manifest;
 }
 
@@ -64,10 +66,10 @@ function decodeChunk(buf) {
   return { n, uprn, lat: new Int32Array(buf, 8 * n, n), lng: new Int32Array(buf, 12 * n, n) };
 }
 
-async function getChunk(env, request, idx) {
+async function getChunk(env, request, version, idx) {
   let c = chunks.get(idx);
   if (!c) {
-    c = decodeChunk(await assetBytes(env, request, `/d/${String(idx).padStart(4, "0")}.bin`));
+    c = decodeChunk(await assetBytes(env, request, `/d/${version}/${String(idx).padStart(4, "0")}.bin`));
     // Bound the per-isolate cache; chunks are ~128 KiB decoded.
     if (chunks.size >= 8) chunks.delete(chunks.keys().next().value);
     chunks.set(idx, c);
@@ -139,10 +141,10 @@ export default {
     }
 
     try {
-      const man = await getManifest(env, request);
+      const man = await getManifest(env, request, version);
       const idx = chunkFor(man, target);
       if (idx >= 0) {
-        const c = await getChunk(env, request, idx);
+        const c = await getChunk(env, request, version, idx);
         let lo = 0, hi = c.n - 1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1, u = c.uprn[mid];

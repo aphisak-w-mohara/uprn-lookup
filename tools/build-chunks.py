@@ -28,10 +28,23 @@ DecompressionStream. Cloudflare does not compress application/octet-stream,
 and setting Content-Encoding by hand does not make browsers decode it, so
 compression has to be explicit on both ends.
 
-    python3 tools/build-chunks.py <osopenuprn_*.csv> [outdir]
+Output paths carry the release version:
+
+    public/d/<version>/0000.bin ...
+    public/d/<version>/manifest.bin
+
+Chunk boundaries shift whenever OS inserts a UPRN, so a client holding a new
+manifest alongside a chunk cached from the previous release would search the
+wrong range and report an existing UPRN as missing. Versioned paths make every
+data file immutable, so the two can never be mixed and the files can be cached
+for a year instead of revalidated daily.
+
+    python3 tools/build-chunks.py <osopenuprn_*.csv> [outdir] [version]
 """
 import gzip
 import os
+import re
+import shutil
 import struct
 import sys
 
@@ -65,16 +78,28 @@ def pack_chunk(uprns, lats, lngs):
     )
 
 
+def derive_version(src: str) -> str:
+    # osopenuprn_202609.csv -> 2026-09
+    m = re.search(r"(\d{4})(\d{2})", os.path.basename(src))
+    if not m:
+        sys.exit(f"cannot derive a version from {src!r}; pass one explicitly")
+    return f"{m.group(1)}-{m.group(2)}"
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     src = sys.argv[1]
     out = sys.argv[2] if len(sys.argv) > 2 else "public"
-    ddir = os.path.join(out, "d")
+    version = sys.argv[3] if len(sys.argv) > 3 else derive_version(src)
+
+    root = os.path.join(out, "d")
+    ddir = os.path.join(root, version)
+    # Previous releases are removed: they are reproducible, and keeping them
+    # would double the deployed file count every month.
+    if os.path.isdir(root):
+        shutil.rmtree(root)
     os.makedirs(ddir, exist_ok=True)
-    for stale in os.listdir(ddir):
-        if stale.endswith(".bin"):
-            os.remove(os.path.join(ddir, stale))
 
     firsts, u, la, ln = [], [], [], []
     n = chunks = 0
@@ -119,10 +144,10 @@ def main() -> int:
     # Float64 is exact to 2^53 and the largest UPRN is ~9.07e11, so the reader
     # can search this as a Float64Array without BigInt.
     man = gz(struct.pack(f"<{len(firsts)}d", *firsts))
-    with open(os.path.join(out, "manifest.bin"), "wb") as fh:
+    with open(os.path.join(ddir, "manifest.bin"), "wb") as fh:
         fh.write(man)
 
-    print(f"{n:,} rows -> {chunks:,} chunks, manifest {len(man):,} bytes gzipped")
+    print(f"{n:,} rows -> {chunks:,} chunks in d/{version}/, manifest {len(man):,} bytes gzipped")
     print(f"payload {raw_total / 1048576:.0f} MiB -> on disk {gz_total / 1048576:.0f} MiB "
           f"({100 * gz_total / raw_total:.1f}%), mean chunk {gz_total // max(chunks, 1):,} bytes")
     return 0

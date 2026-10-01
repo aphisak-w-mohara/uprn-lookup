@@ -1,10 +1,11 @@
-# Chunk paths are stable across releases, so the content at /d/NNNN.bin
-# changes when OS publishes. "immutable" would therefore serve stale
-# coordinates for a year after a refresh. A day of freshness plus background
-# revalidation matches a dataset that moves monthly.
+# Data files carry the release version in their path, so their contents can
+# never change. That makes them safely immutable, and makes it impossible for
+# a client to pair a new manifest with a chunk cached from a previous release
+# — which would search the wrong range and report an existing UPRN as missing.
 /d/*
-  Cache-Control: public, max-age=86400, stale-while-revalidate=2592000
-/manifest.bin
-  Cache-Control: public, max-age=86400, stale-while-revalidate=2592000
+  Cache-Control: public, max-age=31536000, immutable
+
+# The pointer to the current release. Short-lived by design: this is what makes
+# a refresh visible, so it must not be cached for long.
 /version.json
-  Cache-Control: public, max-age=300
+  Cache-Control: public, max-age=300, must-revalidate

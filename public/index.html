@@ -229,11 +229,34 @@ async function lookup(file, targetStr) {
      8n   int32  x n      lat, scaled 1e7
      12n  int32  x n      lng, scaled 1e7
 
+   Data lives under d/<version>/, which version.json points at. Chunk
+   boundaries shift whenever OS inserts a UPRN, so pairing a new manifest with
+   a chunk cached from the previous release would search the wrong range and
+   report an existing UPRN as missing. Versioned paths make that impossible
+   and let the files be cached for a year.
+
    Cloudflare does not compress application/octet-stream, so payloads are
    gzipped on disk and inflated here. UPRNs are held as Float64: exact to
    2^53, and the largest is ~9.07e11, so no BigInt in the hot path. */
+let versionPromise = null;
 let manifest = null;
-const chunkCache = new Map();
+let chunkCache = new Map();
+
+function loadVersion() {
+  if (!versionPromise) {
+    versionPromise = fetch("version.json", { cache: "no-cache" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("version.json " + r.status))));
+  }
+  return versionPromise;
+}
+
+/* A deploy removes the previous release's files, so a page open across one
+   will 404. Drop everything derived from the old version and try again. */
+function resetVersion() {
+  versionPromise = null;
+  manifest = null;
+  chunkCache = new Map();
+}
 
 async function gunzip(buf) {
   if (typeof DecompressionStream === "undefined") {
@@ -243,15 +266,13 @@ async function gunzip(buf) {
   return new Response(stream).arrayBuffer();
 }
 
+class Gone extends Error {}
+
 async function fetchBinary(path) {
   const r = await fetch(path);
+  if (r.status === 404) throw new Gone(path);
   if (!r.ok) throw new Error("Could not load " + path + " (" + r.status + ")");
   return gunzip(await r.arrayBuffer());
-}
-
-async function getManifest() {
-  if (!manifest) manifest = new Float64Array(await fetchBinary("manifest.bin"));
-  return manifest;
 }
 
 function decodeChunk(buf) {
@@ -277,16 +298,18 @@ function chunkFor(man, target) {
   return found;
 }
 
-async function hostedLookup(uprnStr) {
-  const target = Number(uprnStr);
-  if (!Number.isSafeInteger(target)) throw new Error("UPRN is out of range");
-  const man = await getManifest();
-  const idx = chunkFor(man, target);
+async function lookupOnce(target) {
+  const { version } = await loadVersion();
+  if (!version) throw new Error("version.json has no version");
+  const base = "d/" + version + "/";
+
+  if (!manifest) manifest = new Float64Array(await fetchBinary(base + "manifest.bin"));
+  const idx = chunkFor(manifest, target);
   if (idx < 0) return null;
 
   let c = chunkCache.get(idx);
   if (!c) {
-    c = decodeChunk(await fetchBinary("d/" + String(idx).padStart(4, "0") + ".bin"));
+    c = decodeChunk(await fetchBinary(base + String(idx).padStart(4, "0") + ".bin"));
     if (chunkCache.size >= 8) chunkCache.delete(chunkCache.keys().next().value);
     chunkCache.set(idx, c);
   }
@@ -300,6 +323,18 @@ async function hostedLookup(uprnStr) {
     if (u < target) lo = mid + 1; else hi = mid - 1;
   }
   return null;
+}
+
+async function hostedLookup(uprnStr) {
+  const target = Number(uprnStr);
+  if (!Number.isSafeInteger(target)) throw new Error("UPRN is out of range");
+  try {
+    return await lookupOnce(target);
+  } catch (err) {
+    if (!(err instanceof Gone)) throw err;
+    resetVersion();
+    return lookupOnce(target);
+  }
 }
 
 /* ---------- Wiring ---------- */
@@ -480,10 +515,10 @@ async function runTests() {
     "<strong>Self-check: " + pass + "/" + cases.length + " passed</strong>");
 }
 
-/* Dataset provenance, written by the refresh workflow. Non-blocking and
-   non-fatal: if it is missing the page still works, it just says less. */
-fetch("version.json")
-  .then((r) => (r.ok ? r.json() : null))
+/* Dataset provenance, written by the refresh workflow. Shares the single
+   version.json request the lookup path already needs. Non-fatal: if it fails
+   the page still works, it just says less. */
+loadVersion()
   .then((v) => {
     if (!v || !v.version) return;
     const built = new Date(v.builtAt);
