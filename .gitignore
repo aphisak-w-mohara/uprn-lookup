@@ -2,3 +2,7 @@ node_modules/
 .wrangler/
 .DS_Store
 *.csv
+# Chunks are published as GitHub Release assets, not committed. Each release
+# replaces all 5,088 files and git history cannot shed them. Fetch them with
+# tools/fetch-data.sh; public/version.json pins which release and its SHA-256.
+public/d/

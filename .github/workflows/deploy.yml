@@ -32,6 +32,14 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Chunks are not in git; version.json pins which release asset to use
+      # and its SHA-256, so a replaced or corrupted asset fails here rather
+      # than being deployed.
+      - name: Fetch data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/fetch-data.sh
+
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -91,7 +91,7 @@ entirely: 111 ms on a hit against 391 ms for the full path.
 | per lookup | ~43 KB, one round trip |
 | API cached / uncached | 111 ms / 391 ms |
 | rate limit | 120 req/min/IP, fails open |
-| repository | ~213 MiB added per release, permanently |
+| repository | code only; data in Release assets |
 
 ### Record and chunk layout
 
@@ -239,11 +239,12 @@ public/
   index.html        the app; also the API-free local CSV mode
   version.json      points at the current release; rewritten by CI
   _headers          cache policy: data immutable, pointer short-lived
-  d/<version>/
+  d/<version>/      not committed — fetched from a Release asset
     manifest.bin    gzipped Float64Array of each chunk's first UPRN
     0000.bin ...    5,088 gzipped columnar chunks
 src/worker.js       /api/* — rate limit, KV cache, same search
 tools/build-chunks.py   CSV -> chunks + manifest
+tools/fetch-data.sh     download + verify the pinned release
 wrangler.jsonc      bindings: ASSETS, UPRN_CACHE (KV), API_LIMITER
 ```
 
@@ -293,7 +294,8 @@ samples 40 rows uniformly from the source CSV and looks each one up through the
 generated chunks, and only then commits and deploys.
 
 **`deploy.yml`** — on pushes to `main` touching `public/`, `src/` or
-`wrangler.jsonc`. After deploying it smoke-tests the live URL against known
+`wrangler.jsonc`. It fetches the data release pinned in `version.json`,
+verifies its hash, deploys, then smoke-tests the live URL against known
 coordinates for a first, last and missing UPRN. A deploy that returns 200 while
 serving wrong bytes is the failure worth catching, and a status check would not
 catch it.
@@ -313,40 +315,57 @@ OS byte from the build platform — 3 on Linux, 255 on macOS — so a local rebu
 and a CI rebuild differed in exactly one byte per file, and git saw all 5,088
 as changed. The generator pins that byte.
 
-### Repository size
+### Where the data lives
 
-**This is the real long-term constraint.** Each release replaces every chunk,
-git history is append-only, and gzipped data cannot be delta-compressed, so a
-refresh adds ~213 MiB that never goes away. `.git` is 518 MiB today:
+Chunks are **not committed**. Each release replaces all 5,088 of them, gzipped
+data cannot be delta-compressed, and git history cannot shed them, so committing
+cost ~213 MiB a month forever — GitHub's 1 GB guidance would have been reached
+in about 2.4 months.
 
-| GitHub guidance | reached in |
-|---|---|
-| 1 GB, ideal | ~2.4 months |
-| 5 GB, strongly recommended maximum | ~1.8 years |
-| 10 GB, recommended `.git` maximum | ~3.8 years |
+Instead each release is published as a GitHub Release asset, `data-<version>`,
+holding `chunks-<version>.tar`. Release assets sit outside git history, so the
+repository holds only code and stops growing.
 
-Clones get slower the whole way. Pushes are not the issue — one release is
-~213 MB against a 2 GB push limit.
+`public/version.json` is committed and pins both the asset and its SHA-256:
 
-The fix is small: delete the `Commit` step from `refresh-data.yml` and
-gitignore `public/d/`. The data is fully reproducible from the OS download, and
-`wrangler deploy` uploads from the CI working tree, so nothing about serving
-changes. The repository stops growing and holds only code. What is lost is
-having past releases' exact bytes in git.
+```json
+"chunksSha256": "3640e423...efc978",
+"chunksAsset": "data-2026-09/chunks-2026-09.tar"
+```
 
-## Rebuilding by hand
+Release assets can be replaced by anyone with write access, so
+`tools/fetch-data.sh` refuses a tarball whose hash does not match — and checks
+before touching `public/d/`, so a bad download cannot wipe a good copy. Both
+workflows and local development go through it.
 
-Download **OS Open UPRN** (CSV) from
+The refresh workflow publishes the release **before** committing the new
+`version.json`, so the pointer can never name an asset that failed to upload.
+
+History from before this change still carries earlier releases (~518 MiB).
+Stopping commits halts growth but does not shrink it; that would need a history
+rewrite and force-push, which changes every commit SHA.
+
+## Working locally
+
+A fresh clone has no data. Fetch the current release:
+
+```bash
+./tools/fetch-data.sh
+python3 -m http.server -d public 8777
+```
+
+Needs `gh` (authenticated) and `jq`. To build from source instead, download
+**OS Open UPRN** (CSV) from
 [OS Data Hub](https://osdatahub.os.uk/downloads/open/OpenUPRN), then:
 
 ```bash
 python3 tools/build-chunks.py path/to/osopenuprn_*.csv public
-wrangler deploy
 ```
 
-The generator asserts the input is strictly ascending and exits if it is not —
-the binary search depends on that property, so it is checked rather than
-assumed.
+The version is taken from the filename (`osopenuprn_202609.csv` → `2026-09`)
+and the generator refuses to guess if it cannot. It also asserts the input is
+strictly ascending — the binary search depends on that property, so it is
+checked rather than assumed.
 
 ## Tests
 

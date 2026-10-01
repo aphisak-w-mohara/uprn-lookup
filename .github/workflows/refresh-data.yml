@@ -166,6 +166,29 @@ jobs:
           print(f"verified {len(picked)} uniform-sampled lookups against the source CSV")
           PY
 
+      # Chunks are published as a Release asset rather than committed: each
+      # release replaces all of them and git history cannot shed them. This
+      # runs before version.json is committed, so the pointer can never name
+      # an asset that failed to upload.
+      - name: Package and publish chunks
+        if: steps.meta.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Deterministic archive, so re-running a release reproduces its hash.
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf "chunks-$V.tar" -C public "d/$V"
+          sha=$(sha256sum "chunks-$V.tar" | cut -d' ' -f1)
+          echo "CHUNKS_SHA=$sha" >> "$GITHUB_ENV"
+          ls -l "chunks-$V.tar"
+          gh release view "data-$V" >/dev/null 2>&1 || \
+            gh release create "data-$V" --title "Data $V" \
+              --notes "OS Open UPRN $V as gzipped columnar chunks. Fetch with tools/fetch-data.sh, which verifies against the SHA-256 pinned in public/version.json. Contains Ordnance Survey data (c) Crown copyright and database right."
+          gh release upload "data-$V" "chunks-$V.tar" --clobber
+          echo "published data-$V  sha256 $sha"
+
       - name: Write version.json
         if: steps.meta.outputs.changed == 'true'
         run: |
@@ -177,8 +200,10 @@ jobs:
             --argjson rows   "${ROWS:-0}" \
             --argjson chunks "${CHUNKS:-0}" \
             --arg built   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sha     "$CHUNKS_SHA" \
             '{version:$version, md5:$md5, sourceFile:$file, rows:$rows,
-              chunks:$chunks, recordBytes:16, recordsPerChunk:8192, builtAt:$built}' \
+              chunks:$chunks, recordBytes:16, recordsPerChunk:8192, builtAt:$built,
+              chunksSha256:$sha, chunksAsset:("data-" + $version + "/chunks-" + $version + ".tar")}' \
             > public/version.json
           cat public/version.json
 
@@ -188,7 +213,7 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A public
+          git add public/version.json
           if git diff --cached --quiet; then
             echo "nothing staged"; exit 0
           fi

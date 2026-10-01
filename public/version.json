@@ -6,5 +6,7 @@
   "chunks": 5088,
   "recordBytes": 16,
   "recordsPerChunk": 8192,
-  "builtAt": "2026-09-23T06:38:00Z"
+  "builtAt": "2026-09-23T06:38:00Z",
+  "chunksSha256": "3640e42371fb89f477e1575b588b5f5025035be187f8a3ce3648fa5815efc978",
+  "chunksAsset": "data-2026-09/chunks-2026-09.tar"
 }
