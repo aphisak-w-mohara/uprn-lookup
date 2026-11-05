@@ -268,8 +268,11 @@ async function gunzip(buf) {
 
 class Gone extends Error {}
 
-async function fetchBinary(path) {
-  const r = await fetch(path);
+/* `fresh` bypasses the HTTP cache. /d/* is served immutable for a year, and
+   that header lands on 404s too, so a browser that saw a 404 would replay it
+   from cache for a year without this. */
+async function fetchBinary(path, fresh) {
+  const r = await fetch(path, fresh ? { cache: "reload" } : undefined);
   if (r.status === 404) throw new Gone(path);
   if (!r.ok) throw new Error("Could not load " + path + " (" + r.status + ")");
   return gunzip(await r.arrayBuffer());
@@ -298,18 +301,18 @@ function chunkFor(man, target) {
   return found;
 }
 
-async function lookupOnce(target) {
+async function lookupOnce(target, fresh) {
   const { version } = await loadVersion();
   if (!version) throw new Error("version.json has no version");
   const base = "d/" + version + "/";
 
-  if (!manifest) manifest = new Float64Array(await fetchBinary(base + "manifest.bin"));
+  if (!manifest) manifest = new Float64Array(await fetchBinary(base + "manifest.bin", fresh));
   const idx = chunkFor(manifest, target);
   if (idx < 0) return null;
 
   let c = chunkCache.get(idx);
   if (!c) {
-    c = decodeChunk(await fetchBinary(base + String(idx).padStart(4, "0") + ".bin"));
+    c = decodeChunk(await fetchBinary(base + String(idx).padStart(4, "0") + ".bin", fresh));
     if (chunkCache.size >= 8) chunkCache.delete(chunkCache.keys().next().value);
     chunkCache.set(idx, c);
   }
@@ -333,7 +336,7 @@ async function hostedLookup(uprnStr) {
   } catch (err) {
     if (!(err instanceof Gone)) throw err;
     resetVersion();
-    return lookupOnce(target);
+    return lookupOnce(target, true);
   }
 }
 

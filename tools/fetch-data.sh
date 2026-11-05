@@ -17,6 +17,22 @@ want=$(jq -r '.chunksSha256 // empty' public/version.json)
 [ -n "$version" ] || { echo "public/version.json has no version" >&2; exit 1; }
 [ -n "$want" ]    || { echo "public/version.json has no chunksSha256" >&2; exit 1; }
 
+# --check: fail unless the pinned release is already extracted. Wired into
+# wrangler.jsonc as the build command, so `wrangler deploy` from a checkout
+# without data fails instead of shipping a site whose every lookup 404s.
+if [ "${1:-}" = "--check" ]; then
+  n_want=$(jq -r '.chunks' public/version.json)
+  # `|| true`: with no public/d/ at all, find fails and pipefail + set -e
+  # would exit here silently, before the message below.
+  n_got=$(find "public/d/$version" -name '[0-9]*.bin' 2>/dev/null | wc -l | tr -d ' ' || true)
+  if [ ! -f "public/d/$version/manifest.bin" ] || [ "$n_got" != "$n_want" ]; then
+    echo "public/d/$version/ has $n_got of $n_want chunks. Run ./tools/fetch-data.sh before deploying." >&2
+    exit 1
+  fi
+  echo "ok: $n_got chunks in public/d/$version/"
+  exit 0
+fi
+
 tag="data-$version"
 asset="chunks-$version.tar"
 tmp=$(mktemp -d)
