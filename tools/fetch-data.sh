@@ -22,7 +22,9 @@ want=$(jq -r '.chunksSha256 // empty' public/version.json)
 # without data fails instead of shipping a site whose every lookup 404s.
 if [ "${1:-}" = "--check" ]; then
   n_want=$(jq -r '.chunks' public/version.json)
-  n_got=$(find "public/d/$version" -name '[0-9]*.bin' 2>/dev/null | wc -l | tr -d ' ')
+  # `|| true`: with no public/d/ at all, find fails and pipefail + set -e
+  # would exit here silently, before the message below.
+  n_got=$(find "public/d/$version" -name '[0-9]*.bin' 2>/dev/null | wc -l | tr -d ' ' || true)
   if [ ! -f "public/d/$version/manifest.bin" ] || [ "$n_got" != "$n_want" ]; then
     echo "public/d/$version/ has $n_got of $n_want chunks. Run ./tools/fetch-data.sh before deploying." >&2
     exit 1
