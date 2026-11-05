@@ -343,9 +343,14 @@ workflows and local development go through it.
 
 `wrangler.jsonc` runs `tools/fetch-data.sh --check` as its build command, so
 `wrangler deploy` or `wrangler dev` fails on a checkout without the full chunk
-set. Without it, a local deploy from a fresh clone ships a site where every
-lookup 404s. That happened on 2026-10-01 and stayed live for five weeks,
-because the CI smoke test only runs on CI deploys.
+set. Without it, any deploy from a plain clone ships a site where every lookup
+404s. That happened on 2026-10-01: Cloudflare Workers Builds (the dashboard's
+Git integration) also deploys on every push to `main`, from a clone with no
+data. It finished one second after `refresh-data.yml` and replaced the good
+deploy. The broken site stayed live for five weeks, because the CI smoke test
+runs only after the CI deploy. With the check, a Workers Build now fails
+instead of deploying. Disconnecting the Git integration removes the race
+entirely.
 
 The refresh workflow publishes the release **before** committing the new
 `version.json`, so the pointer can never name an asset that failed to upload.

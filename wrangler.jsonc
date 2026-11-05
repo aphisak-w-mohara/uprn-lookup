@@ -3,7 +3,7 @@
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
   // Chunks are not in git. Refuse to deploy a checkout that has not fetched
-  // them: that shipped a data-less site on 2026-10-01.
+  // them: a Cloudflare Workers Build did exactly that on 2026-10-01.
   "build": { "command": "./tools/fetch-data.sh --check" },
   "assets": { "directory": "./public", "binding": "ASSETS" },
   "kv_namespaces": [
