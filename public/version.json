@@ -1,12 +1,12 @@
 {
-  "version": "2026-09",
-  "md5": "1d5c21d8166d6efd74850ec6f1ae77ab",
-  "sourceFile": "osopenuprn_202609_csv.zip",
-  "rows": 41676575,
-  "chunks": 5088,
+  "version": "2026-10",
+  "md5": "3a03b33581161dfd619fc3f8fe52d4ec",
+  "sourceFile": "osopenuprn_202610_csv.zip",
+  "rows": 41712217,
+  "chunks": 5092,
   "recordBytes": 16,
   "recordsPerChunk": 8192,
-  "builtAt": "2026-10-01T11:02:43Z",
-  "chunksSha256": "fd02ccfcaefd81514a10eaa5ba86e01272ebf7666d93b4da9e2e050c9758d2a9",
-  "chunksAsset": "data-2026-09/chunks-2026-09.tar"
+  "builtAt": "2026-11-08T13:37:23Z",
+  "chunksSha256": "b4ee5db7a3e463be3f444b88a72784e614fee5553207bff36caac006336d3fea",
+  "chunksAsset": "data-2026-10/chunks-2026-10.tar"
 }
